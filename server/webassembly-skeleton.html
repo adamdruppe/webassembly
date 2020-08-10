@@ -1,0 +1,28 @@
+<html>
+  <head>
+  	<meta charset="utf-8" />
+	<style>
+		#stdout {
+			white-space: pre;
+		}
+	</style>
+  </head>
+  <body>
+    arsd.webassembly
+
+    <div id="screen"></div>
+
+    <div id="stdout"></div>
+
+    <script src="/webassembly-core.js"></script>
+    <script>
+	WebAssembly.instantiateStreaming(fetch('/omg.wasm'), importObject)
+		.then(function(obj) {
+			memory = obj.instance.exports.memory;
+			bridge_malloc = obj.instance.exports.bridge_malloc;
+			exports = obj.instance.exports;
+			obj.instance.exports._start();
+		});
+    </script>
+  </body>
+</html>
