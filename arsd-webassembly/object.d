@@ -29,13 +29,13 @@ ubyte[] malloc(size_t sz) {
 	return ret[0 .. sz];
 }
 
-extern(C) ubyte* bridge_malloc(size_t sz) {
+export extern(C) ubyte* bridge_malloc(size_t sz) {
 	return malloc(sz).ptr;
 }
 
 // then the entry point just for convenience so main works.
 extern(C) int _Dmain(string[] args);
-extern(C) void _start() { _Dmain(null); }
+export extern(C) void _start() { _Dmain(null); }
 
 extern(C) bool _xopEquals(in void*, in void*) { return false; } // assert(0);
 
@@ -55,7 +55,8 @@ extern(C) void _d_array_slice_copy(void* dst, size_t dstlen, void* src, size_t s
 
 }
 
-extern(C) void _d_arraybounds(string file, size_t line) {
+extern(C) void _d_arraybounds(string file, size_t line) { //, size_t lwr, size_t upr, size_t length) {
+	arsd.webassembly.eval(q{ console.error("Range error: " + $0 + ":" + $1); /*, "[" + $2 + ".." + $3 + "] <> " + $4);*/ }, file, line);//, lwr, upr, length);
 	arsd.webassembly.abort();
 }
 
@@ -85,7 +86,10 @@ extern(C) void* _d_allocmemory(size_t sz) {
 }
 
 class Object {}
-class TypeInfo {}
+class TypeInfo {
+	const(TypeInfo) next() const { return this; }
+	size_t size() const { return 1; }
+}
 class TypeInfo_Class : TypeInfo {
 	ubyte[] m_init;
 	string name;
@@ -99,20 +103,99 @@ class TypeInfo_Class : TypeInfo {
 	void*[] offti;
 	void function(Object) dctor;
 	immutable(void)* rtInfo;
+
+	override size_t size() const { return size_t.sizeof; }
 }
 
 class TypeInfo_Array : TypeInfo {
 	TypeInfo value;
+	override size_t size() const { return 2*size_t.sizeof; }
+	override const(TypeInfo) next() const { return value; }
 }
 
 extern(C) void[] _d_newarrayT(const TypeInfo ti, size_t length) {
-	return malloc(length * 4); // FIXME size depends on ti
+	return malloc(length * ti.size); // FIXME size actually depends on ti
 }
 
-class TypeInfo_Ai : TypeInfo_Array {}
+template _d_arraysetlengthTImpl(Tarr : T[], T) {
+	size_t _d_arraysetlengthT(return scope ref Tarr arr, size_t newlength) {
+		auto ptr = cast(T*) malloc(newlength * T.sizeof);
+		arr = ptr[0 .. newlength];
+		return newlength;
+	}
+}
+
+// FIXME so broken. and idk all why.
+extern (C) byte[] _d_arrayappendcTX(const TypeInfo ti, ref byte[] px, size_t n) @trusted {
+	auto elemSize = ti.next.size;
+	auto newLength = n + px.length;
+	auto newSize = newLength * elemSize;
+	//import std.stdio; writeln(newSize, " ", newLength);
+	auto ptr = cast(byte*) malloc(newSize);
+	auto ns = ptr[0 .. newSize];
+	auto op = px.ptr;
+	auto ol = px.length * elemSize;
+
+	foreach(i, b; op[0 .. ol])
+		ns[i] = b;
+
+	(cast(size_t *)(&px))[0] = newLength;
+	(cast(void **)(&px))[1] = ns.ptr;
+	return px;
+}
+
+
+alias AliasSeq(T...) = T;
+static foreach(type; AliasSeq!(byte, char, dchar, double, float, int, long, short, ubyte, uint, ulong, ushort, void, wchar)) {
+	mixin(q{
+		class TypeInfo_}~type.mangleof~q{ : TypeInfo {
+			override size_t size() const { return type.sizeof; }
+		}
+		class TypeInfo_A}~type.mangleof~q{ : TypeInfo_Array {
+			override const(TypeInfo) next() const { return typeid(type); }
+		}
+	});
+}
+
+class TypeInfo_Aya : TypeInfo_Aa {
+
+}
+
+class TypeInfo_Delegate : TypeInfo {
+	TypeInfo next;
+	string deco;
+	override size_t size() const { return size_t.sizeof * 2; }
+}
 
 class TypeInfo_Const : TypeInfo {
 	size_t getHash(in void*) nothrow { return 0; }
+	TypeInfo base;
+	override size_t size() const { return base.size; }
+	override const(TypeInfo) next() const { return base; }
+}
+/+
+class TypeInfo_Immutable : TypeInfo {
+	size_t getHash(in void*) nothrow { return 0; }
+	TypeInfo base;
+}
++/
+class TypeInfo_Invariant : TypeInfo {
+	size_t getHash(in void*) nothrow { return 0; }
+	TypeInfo base;
+	override size_t size() const { return base.size; }
+	override const(TypeInfo) next() const { return base; }
+}
+class TypeInfo_Shared : TypeInfo {
+	size_t getHash(in void*) nothrow { return 0; }
+	TypeInfo base;
+	override size_t size() const { return base.size; }
+	override const(TypeInfo) next() const { return base; }
+}
+class TypeInfo_Inout : TypeInfo {
+	size_t getHash(in void*) nothrow { return 0; }
+	TypeInfo base;
+	override size_t size() const { return base.size; }
+	override const(TypeInfo) next() const { return base; }
 }
 
 class TypeInfo_Struct : TypeInfo {
@@ -130,6 +213,7 @@ class TypeInfo_Struct : TypeInfo {
 	void function(void*) postblit;
 	uint align_;
 	immutable(void)* rtinfo;
+	override size_t size() const { return m_init.length; }
 }
 
 // }

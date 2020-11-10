@@ -1,5 +1,7 @@
 
 // can webassembly's main be async?
+// I might be able to make a semaphore out of
+// https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Atomics/wait
 
 // stores { object: o, refcount: n }
 var bridgeObjects = [{}]; // the first one is a null object; ignored
@@ -61,6 +63,10 @@ var importObject = {
 					// a handle
 					value = bridgeObjects[ptr].object;
 				break;
+				case 3:
+					// float passed by ref cuz idk how else to reinterpret cast in js
+					value = (new Float32Array(memory.buffer, ptr, 1))[0];
+				break;
 			}
 
 			jsArgs.push(value);
@@ -77,6 +83,9 @@ var importObject = {
 				return ret;
 			case 2:
 				// float
+				var view = new Float32Array(memory.buffer, 0, 1);
+				view[0] = ret;
+				return 0;
 			case 3:
 				// boxed object
 				var handle = bridgeObjects.length;
@@ -116,7 +125,11 @@ var importObject = {
 				bridgeObjects.pop();
 		}
 	},
-	abort: function() { throw "aborted"; },
+	abort: function() {
+		var i = document.getElementById("stdout");
+		i.innerHTML += "<div style='color: red;'>Aborted</div>";
+		throw "aborted";
+	},
 	_Unwind_Resume: function() {}
     }
 };

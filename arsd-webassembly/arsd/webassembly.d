@@ -51,6 +51,10 @@ template eval(T = void) {
 				aa[idx].type = 2;
 				aa[idx].ptr = cast(void*) arg.handle;
 				aa[idx].length = NativeHandle.sizeof;
+			} else static if(is(typeof(arg) : const float)) {
+				aa[idx].type = 3;
+				aa[idx].ptr = cast(void*) &arg;
+				aa[idx].length = arg.sizeof;
 			} else {
 				static assert(0);
 			}
@@ -59,6 +63,8 @@ template eval(T = void) {
 			acquire(0, callingModuleName, code, aa[]);
 		else static if(is(T == int))
 			return acquire(1, callingModuleName, code, aa[]);
+		else static if(is(T == float))
+			return *cast(float*) cast(void*) acquire(2, callingModuleName, code, aa[]);
 		else static if(is(T == NativeHandle))
 			return NativeHandle(acquire(3, callingModuleName, code, aa[]));
 		else static if(is(T == string)) {
