@@ -16,13 +16,6 @@ var exports;
 
 var importObject = {
     env: {
-	memorySize: function() { return memory.buffer.byteLength; },
-	growMemory: function(by) {
-		const bytesPerPage = 64 * 1024;
-		memory.grow((by + bytesPerPage) / bytesPerPage);
-		return memory.buffer.byteLength;
-	},
-
 	acquire: function(returnType, modlen, modptr, javascriptCodeStringLength, javascriptCodeStringPointer, argsLength, argsPtr) {
 		var td = new TextDecoder();
 		var md = td.decode(new Uint8Array(memory.buffer, modptr, modlen));
@@ -53,7 +46,10 @@ var importObject = {
 			switch(type) {
 				case 0:
 					// an integer was casted to the pointer
-					value = ptr;
+					if(ptr & 0x80000000)
+						value = - (~ptr + 1); // signed 2's complement
+					else
+						value = ptr;
 				break;
 				case 1:
 					// pointer+length is a string
@@ -67,6 +63,18 @@ var importObject = {
 					// float passed by ref cuz idk how else to reinterpret cast in js
 					value = (new Float32Array(memory.buffer, ptr, 1))[0];
 				break;
+				case 4:
+					// float passed by ref cuz idk how else to reinterpret cast in js
+					value = (new Uint8Array(memory.buffer, ptr, length));
+				break;
+				/*
+				case 5:
+					// a pointer to a delegate
+					let p1 = a[ptr];
+					let p2 = a[ptr + 1];
+					value = function()
+				break;
+				*/
 			}
 
 			jsArgs.push(value);

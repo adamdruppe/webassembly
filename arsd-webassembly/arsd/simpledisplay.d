@@ -4,7 +4,7 @@ public import arsd.color;
 
 import arsd.webassembly;
 
-shared static this() { eval("hi there"); }
+//shared static this() { eval("hi there"); }
 
 class SimpleWindow {
 	this(int width, int height, string title = "D Application") {
@@ -72,9 +72,11 @@ class SimpleWindow {
 			}
 			document.body.addEventListener("keydown", function(event) {
 				exports.sdpy_key_trigger(1, translate(event.key));
+				event.preventDefault();
 			}, true);
 			document.body.addEventListener("keyup", function(event) {
 				exports.sdpy_key_trigger(0, translate(event.key));
+				event.preventDefault();
 			}, true);
 			$0.addEventListener("mousedown", function(event) {
 				exports.sdpy_mouse_trigger(1, event.button, event.offsetX, event.offsetY);
@@ -156,6 +158,28 @@ struct ScreenPainter {
 		context.properties.fillStyle!string = cast(immutable)(data[]);
 	}
 
+	/*
+	void drawPolygon(Point[] points) {
+		int[] xes;
+		int[] yes;
+
+		foreach(point; points) {
+			xes ~= point.x;
+			yes ~= point.y;
+		}
+		
+		eval(q{
+			var context = $0;
+			context.beginPath();
+			context.moveTo($1 + 0.5, $2 + 0.5, $3 - 1, $4 - 1);
+			context.closePath();
+
+			context.stroke();
+			context.fill();
+		}, context, xes, yes);
+	}
+	*/
+
 	void drawRectangle(Point p, int w, int h) {
 		eval(q{
 			var context = $0;
@@ -176,6 +200,17 @@ struct ScreenPainter {
 			context.font = "18px sans-serif";
 			context.strokeText($1, $2, $3 + 16);
 		}, context, txt, p.x, p.y);
+	}
+
+	void drawCircle(Point upperLeft, int diameter) {
+		eval(q{
+			var context = $0;
+			context.beginPath();
+			context.arc($1, $2, $3, 0, 2 * Math.PI, false);
+			context.closePath();
+			context.fill();
+			context.stroke();
+		}, context, upperLeft.x + diameter / 2, upperLeft.y + diameter / 2, diameter / 2);
 	}
 
 	void drawLine(Point p1, Point p2) {
@@ -252,4 +287,23 @@ enum Key {
 	Down,
 	Up,
 	Space
+}
+
+enum MouseCursor { cross }
+
+class OperatingSystemFont {}
+enum UsingSimpledisplayX11 = false;
+enum SimpledisplayTimerAvailable = false;
+
+
+class Sprite{}
+
+enum bool OpenGlEnabled = false;
+
+alias ScreenPainterImplementation = ScreenPainter;
+
+mixin template ExperimentalTextComponent() {
+	class TextLayout {
+
+	}
 }

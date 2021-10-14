@@ -120,6 +120,7 @@ class Board {
 			int mline = line;
 			foreach(xo; 0 .. 4) {
 				if(mline & 0b1000) {
+					// FIXME: potential range violation
 					if(state[(piece.y+yo) * this.width + xo + piece.x])
 						return true;
 				}
@@ -339,7 +340,7 @@ class Piece {
 
 void main() {
 	auto audio = AudioOutputThread(0);
-	audio.start();
+	//audio.start();
 
 	auto board = new Board(10, 20);
 
@@ -423,6 +424,7 @@ void main() {
 			downPressed = kev.pressed;
 		if(!kev.pressed) return;
 		switch(kev.key) {
+			case Key.Up:
 			case Key.Space:
 				currentPiece.erase();
 				currentPiece.rotate();

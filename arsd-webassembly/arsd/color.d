@@ -26,6 +26,58 @@ struct Color {
 		data[6] = toHex(b & 0x0f);
 	}
 
+	static Color fromHsl(double h, double s, double l, double a = 255) {
+		h = h % 360;
+
+		double C = (1 - absInternal(2 * l - 1)) * s;
+
+		double hPrime = h / 60;
+
+		double X = C * (1 - absInternal(hPrime % 2 - 1));
+
+		double r, g, b;
+
+		if(h is double.nan)
+			r = g = b = 0;
+		else if (hPrime >= 0 && hPrime < 1) {
+			r = C;
+			g = X;
+			b = 0;
+		} else if (hPrime >= 1 && hPrime < 2) {
+			r = X;
+			g = C;
+			b = 0;
+		} else if (hPrime >= 2 && hPrime < 3) {
+			r = 0;
+			g = C;
+			b = X;
+		} else if (hPrime >= 3 && hPrime < 4) {
+			r = 0;
+			g = X;
+			b = C;
+		} else if (hPrime >= 4 && hPrime < 5) {
+			r = X;
+			g = 0;
+			b = C;
+		} else if (hPrime >= 5 && hPrime < 6) {
+			r = C;
+			g = 0;
+			b = X;
+		}
+
+		double m = l - C / 2;
+
+		r += m;
+		g += m;
+		b += m;
+
+		return Color(
+			cast(int)(r * 255),
+			cast(int)(g * 255),
+			cast(int)(b * 255),
+			cast(int)(a));
+	}
+
 	static immutable Color white = Color(255, 255, 255, 255);
 	static immutable Color black = Color(0, 0, 0, 255);
 	static immutable Color red = Color(255, 0, 0, 255);
@@ -35,6 +87,7 @@ struct Color {
 	static immutable Color teal = Color(0, 255, 255, 255);
 	static immutable Color purple = Color(255, 0, 255, 255);
 	static immutable Color gray = Color(127, 127, 127, 255);
+	static immutable Color transparent = Color(0, 0, 0, 0);
 }
 
 struct Point {
@@ -57,3 +110,12 @@ struct Size {
 	int width;
 	int height;
 }
+
+
+nothrow @safe @nogc pure
+double absInternal(double a) { return a < 0 ? -a : a; }
+
+struct Rectangle {}
+
+enum arsd_jsvar_compatible = "arsd_jsvar_compatible";
+class MemoryImage {}

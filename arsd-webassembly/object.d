@@ -4,6 +4,7 @@ module object;
 static import arsd.webassembly;
 
 alias string = immutable(char)[];
+alias wstring = immutable(wchar)[];
 alias size_t = uint;
 
 // ldc defines this, used to find where wasm memory begins
@@ -12,6 +13,17 @@ private extern extern(C) ubyte __heap_base;
 // this is less than __heap_base. memory map 0 ... __data_end ... __heap_base ... end of memory
 private extern extern(C) ubyte __data_end;
 
+// llvm intrinsics {
+	pragma(LDC_intrinsic, "llvm.wasm.memory.grow.i32")
+	private int llvm_wasm_memory_grow(int mem, int delta);
+
+
+	pragma(LDC_intrinsic, "llvm.wasm.memory.size.i32")
+	private int llvm_wasm_memory_size(int mem);
+// }
+
+
+
 private ubyte* nextFree;
 private size_t memorySize;
 
@@ -19,7 +31,7 @@ ubyte[] malloc(size_t sz) {
 	// lol bumping that pointer
 	if(nextFree is null) {
 		nextFree = &__heap_base;
-		memorySize = arsd.webassembly.memorySize();
+		memorySize = llvm_wasm_memory_size(0);
 	}
 
 	auto ret = nextFree;
@@ -68,7 +80,22 @@ extern(C) void* memset(void* s, int c, size_t n) {
 	}
 	return s;
 }
+
+pragma(LDC_intrinsic, "llvm.memcpy.p0i8.p0i8.i#")
+    void llvm_memcpy(T)(void* dst, const(void)* src, T len, bool volatile_ = false);
+
+export extern(C) void* memcpy(void* dest, const void* src, size_t n) {
+	llvm_memcpy(dest, src, n);
+	return dest;
+}
+
+
 // }
+
+extern(C) void _d_assert(string file, uint line) {
+	arsd.webassembly.eval(q{ console.error("Assert failure: " + $0 + ":" + $1); /*, "[" + $2 + ".." + $3 + "] <> " + $4);*/ }, file, line);//, lwr, upr, length);
+	arsd.webassembly.abort();
+}
 
 void __switch_error(string file, size_t line) {}
 
@@ -78,6 +105,51 @@ extern(C) Object _d_allocclass(TypeInfo_Class ti) {
 	auto ptr = malloc(ti.m_init.length);
 	ptr[] = ti.m_init[];
 	return cast(Object) ptr.ptr;
+}
+
+extern(C) void* _d_dynamic_cast(Object o, TypeInfo_Class c) {
+	void* res = null;
+	size_t offset = 0;
+	if (o && _d_isbaseof2(typeid(o), c, offset))
+	{
+		res = cast(void*) o + offset;
+	}
+	return res;
+}
+
+extern(C)
+int _d_isbaseof2(scope TypeInfo_Class oc, scope const TypeInfo_Class c, scope ref size_t offset) @safe
+
+{
+    if (oc is c)
+        return true;
+
+    do
+    {
+        if (oc.base is c)
+            return true;
+
+        // Bugzilla 2013: Use depth-first search to calculate offset
+        // from the derived (oc) to the base (c).
+        foreach (iface; oc.interfaces)
+        {
+            if (iface.classinfo is c || _d_isbaseof2(iface.classinfo, c, offset))
+            {
+                offset += iface.offset;
+                return true;
+            }
+        }
+
+        oc = oc.base;
+    } while (oc);
+
+    return false;
+}
+
+// for floats
+extern(C) double fmod(double f, double w) {
+	auto i = cast(int) f;
+	return i % cast(int) w;
 }
 
 // for closures
@@ -94,7 +166,7 @@ class TypeInfo_Class : TypeInfo {
 	ubyte[] m_init;
 	string name;
 	void*[] vtbl;
-	void*[] interfaces;
+	Interface*[] interfaces;
 	TypeInfo_Class base;
 	void* dtor;
 	void function(Object) ci;
@@ -105,6 +177,10 @@ class TypeInfo_Class : TypeInfo {
 	immutable(void)* rtInfo;
 
 	override size_t size() const { return size_t.sizeof; }
+}
+
+class TypeInfo_Pointer : TypeInfo {
+	TypeInfo m_next;
 }
 
 class TypeInfo_Array : TypeInfo {
@@ -125,7 +201,6 @@ template _d_arraysetlengthTImpl(Tarr : T[], T) {
 	}
 }
 
-// FIXME so broken. and idk all why.
 extern (C) byte[] _d_arrayappendcTX(const TypeInfo ti, ref byte[] px, size_t n) @trusted {
 	auto elemSize = ti.next.size;
 	auto newLength = n + px.length;
@@ -144,7 +219,6 @@ extern (C) byte[] _d_arrayappendcTX(const TypeInfo ti, ref byte[] px, size_t n) 
 	return px;
 }
 
-
 alias AliasSeq(T...) = T;
 static foreach(type; AliasSeq!(byte, char, dchar, double, float, int, long, short, ubyte, uint, ulong, ushort, void, wchar)) {
 	mixin(q{
@@ -155,6 +229,12 @@ static foreach(type; AliasSeq!(byte, char, dchar, double, float, int, long, shor
 			override const(TypeInfo) next() const { return typeid(type); }
 		}
 	});
+}
+
+struct Interface {
+	TypeInfo_Class classinfo;
+	void*[] vtbl;
+	size_t offset;
 }
 
 class TypeInfo_Aya : TypeInfo_Aa {

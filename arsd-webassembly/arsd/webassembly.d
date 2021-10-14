@@ -5,9 +5,6 @@ module arsd.webassembly;
 
 // the basic bridge functions defined in webassembly-core.js {
 
-extern(C) size_t memorySize();
-extern(C) size_t growMemory(size_t by);
-
 extern(C) void retain(int);
 extern(C) void release(int);
 
@@ -21,7 +18,19 @@ extern(C) int acquire(int returnType, string callingModuleName, string code, Acq
 
 extern(C) void abort();
 
+
 // }
+
+export extern(C) int invoke_d_array_delegate(size_t ptr, size_t funcptr, ubyte[] arg) {
+	void delegate(in ubyte[] arr) dg;
+
+	dg.ptr = cast(void*) ptr;
+	dg.funcptr = cast(typeof(dg.funcptr)) funcptr;
+
+	dg(arg);
+	return 0;
+	
+};
 
 /++
 	Evaluates the given code in Javascript. The arguments are available in JS as $0, $1, $2, ....
@@ -39,6 +48,7 @@ template eval(T = void) {
 	T eval(Args...)(string code, Args args, string callingModuleName = __MODULE__) {
 		AcquireArgument[Args.length] aa;
 		foreach(idx, ref arg; args) {
+			// FIXME: some other type for unsigned....
 			static if(is(typeof(arg) : const int)) {
 				aa[idx].type = 0;
 				aa[idx].ptr = cast(void*) arg;
@@ -55,6 +65,16 @@ template eval(T = void) {
 				aa[idx].type = 3;
 				aa[idx].ptr = cast(void*) &arg;
 				aa[idx].length = arg.sizeof;
+			} else static if(is(immutable typeof(arg) == immutable ubyte[])) {
+				aa[idx].type = 4;
+				aa[idx].ptr = arg.ptr;
+				aa[idx].length = arg.length;
+			/*
+			} else static if(is(typeof(arg) == delegate)) {
+				aa[idx].type = 5;
+				aa[idx].ptr = cast(void*) &arg;
+				aa[idx].length = arg.sizeof;
+			*/
 			} else {
 				static assert(0);
 			}
