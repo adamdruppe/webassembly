@@ -173,27 +173,14 @@ struct ScreenPainter {
 		//context.properties.fillStyle!string = cast(immutable)(data[]);
 	}
 
-	/*
 	void drawPolygon(Point[] points) {
-		int[] xes;
-		int[] yes;
-
+		addCommand(8);
+		addCommand(cast(double) points.length);
 		foreach(point; points) {
-			xes ~= point.x;
-			yes ~= point.y;
+			push(cast(double) point.x);
+			push(cast(double) point.y);
 		}
-		
-		eval(q{
-			var context = $0;
-			context.beginPath();
-			context.moveTo($1 + 0.5, $2 + 0.5, $3 - 1, $4 - 1);
-			context.closePath();
-
-			context.stroke();
-			context.fill();
-		}, context, xes, yes);
 	}
-	*/
 
 	void drawRectangle(Point p, int w, int h) {
 		addCommand(4, p.x, p.y, w, h);

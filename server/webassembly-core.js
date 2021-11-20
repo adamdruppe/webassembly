@@ -229,6 +229,20 @@ var importObject = {
 
 					context.stroke();
 				break;
+				case 8: // drawPolygon
+					context.beginPath();
+					var count = commands[len++];
+
+					context.moveTo(commands[len++] + 0.5,
+						commands[len++] + 0.5);
+					for(var i = 1; i < count; i++)
+						context.lineTo(commands[len++] + 0.5,
+							commands[len++] + 0.5);
+
+					context.closePath();
+					context.fill();
+					context.stroke();
+				break;
 				default: throw new Error("unknown command from sdpy bridge");
 			}
 		}

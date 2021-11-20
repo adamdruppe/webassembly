@@ -277,6 +277,17 @@ export extern(C) void* memcpy(void* dest, const void* src, size_t n) {
 	return dest;
 }
 
+int memcmp(const(void)* s1, const(void*) s2, size_t n) {
+	auto b = cast(ubyte*) s1;
+	auto b2 = cast(ubyte*) s2;
+
+	foreach(i; 0 .. n) {
+		if(auto diff = b -  b2)
+			return diff;
+	}
+	return 0;
+}
+
 
 // }
 
@@ -349,6 +360,8 @@ class Object {}
 class TypeInfo {
 	const(TypeInfo) next() const { return this; }
 	size_t size() const { return 1; }
+
+	bool equals(void* a, void* b) { return false; }
 }
 class TypeInfo_Class : TypeInfo {
 	ubyte[] m_init;
@@ -376,6 +389,28 @@ class TypeInfo_Array : TypeInfo {
 	override size_t size() const { return 2*size_t.sizeof; }
 	override const(TypeInfo) next() const { return value; }
 }
+
+class TypeInfo_StaticArray : TypeInfo {
+	TypeInfo value;
+	size_t len;
+	override size_t size() const { return value.size * len; }
+	override const(TypeInfo) next() const { return value; }
+
+	override bool equals(void* p1, void* p2) {
+		size_t sz = value.size;
+
+		for (size_t u = 0; u < len; u++)
+		{
+		    if (!value.equals(p1 + u * sz, p2 + u * sz))
+		    {
+			return false;
+		}
+		}
+		return true;
+	}
+
+}
+
 
 extern(C) void[] _d_newarrayT(const TypeInfo ti, size_t length) {
 	return malloc(length * ti.size); // FIXME size actually depends on ti
@@ -460,9 +495,27 @@ static foreach(type; AliasSeq!(byte, char, dchar, double, float, int, long, shor
 	mixin(q{
 		class TypeInfo_}~type.mangleof~q{ : TypeInfo {
 			override size_t size() const { return type.sizeof; }
+			override bool equals(void* a, void* b) {
+				static if(is(type == void))
+					return false;
+				else
+				return (*(cast(type*) a) == (*(cast(type*) b)));
+			}
 		}
 		class TypeInfo_A}~type.mangleof~q{ : TypeInfo_Array {
 			override const(TypeInfo) next() const { return typeid(type); }
+			override bool equals(void* av, void* bv) {
+				type[] a = *(cast(type[]*) av);
+				type[] b = *(cast(type[]*) bv);
+
+				static if(is(type == void))
+					return false;
+				else
+				foreach(idx, item; a)
+					if(item != b[idx])
+						return false;
+				return true;
+			}
 		}
 	});
 }
@@ -518,7 +571,7 @@ class TypeInfo_Struct : TypeInfo {
 	string name;
 	void[] m_init;
 	void* xtohash;
-	void* xopequals;
+	 bool     function(in void*, in void*) xopEquals;
 	int      function(in void*, in void*) xopCmp;
 	void* xtostring;
 	uint flags;
@@ -530,6 +583,20 @@ class TypeInfo_Struct : TypeInfo {
 	uint align_;
 	immutable(void)* rtinfo;
 	override size_t size() const { return m_init.length; }
+
+    override bool equals(in void* p1, in void* p2) @trusted
+    {
+        if (!p1 || !p2)
+            return false;
+        else if (xopEquals)
+            return (*xopEquals)(p1, p2);
+        else if (p1 == p2)
+            return true;
+        else
+            // BUG: relies on the GC not moving objects
+            return memcmp(p1, p2, m_init.length) == 0;
+    }
+
 }
 
 extern(C) bool _xopCmp(in void*, in void*) { return false; }
@@ -570,3 +637,14 @@ extern (C) void[] _d_arrayappendT(const TypeInfo ti, ref byte[] x, byte[] y)
     //__doPostblit(x.ptr + length * sizeelem, y.length * sizeelem, tinext);
     return x;
 }
+
+extern (C) int _adEq2(void[] a1, void[] a2, TypeInfo ti)
+{
+    debug(adi) printf("_adEq2(a1.length = %d, a2.length = %d)\n", a1.length, a2.    length);
+    if (a1.length != a2.length)
+        return 0;               // not equal
+    if (!ti.equals(&a1, &a2))
+        return 0;
+    return 1;
+}
+
