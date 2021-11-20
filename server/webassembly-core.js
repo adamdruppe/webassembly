@@ -8,11 +8,25 @@ var bridgeObjects = [{}]; // the first one is a null object; ignored
 // placeholder to be filled in by the loader
 var memory;
 
+var printBlockDebugInfo;
+function memdump(address, length) {
+	var a = new Uint32Array(memory.buffer, address, length);
+	console.log(a);
+}
+
+function meminfo() {
+	document.getElementById("stdout").innerHTML = "";
+	printBlockDebugInfo(0);
+}
+
 var bridge_malloc;
 
 var dModules = {};
 
 var exports;
+
+
+var savedFunctions = {};
 
 var importObject = {
     env: {
@@ -80,7 +94,14 @@ var importObject = {
 			jsArgs.push(value);
 		}
 
-		var func = new Function(jsArgsNames, s);
+		///*
+		var func = savedFunctions[s];
+		if(!func) {
+			func = new Function(jsArgsNames, s);
+			savedFunctions[s] = func;
+		}
+		//*/
+		//var func = new Function(jsArgsNames, s);
 		var ret = func.apply(dModules[md] ? dModules[md] : (dModules[md] = {}), jsArgs);
 
 		switch(returnType) {
@@ -138,6 +159,82 @@ var importObject = {
 		i.innerHTML += "<div style='color: red;'>Aborted</div>";
 		throw "aborted";
 	},
-	_Unwind_Resume: function() {}
+	_Unwind_Resume: function() {},
+
+	monotimeNow: function() {
+		return performance.now()|0;
+	},
+
+	executeCanvasCommands: function(handle, start, len) {
+		var context = bridgeObjects[handle].object;
+
+		var commands = new Float64Array(memory.buffer, start, len);
+
+		context.save();
+
+		len = 0;
+
+		while(len < commands.length) {
+			switch(commands[len++]) {
+				case 0: break; // intentionally blank
+				case 1: // clear
+					context.clearRect(0, 0, context.canvas.width, context.canvas.height);
+				break;
+				case 2: // strokeStyle
+					var s = "";
+					var slen = commands[len++];
+					for(var i = 0; i < slen; i++)
+						s += String.fromCharCode(commands[len++]);
+					context.strokeStyle = s;
+				break;
+				case 3: // fillStyle
+					var s = "";
+					var slen = commands[len++];
+					for(var i = 0; i < slen; i++)
+						s += String.fromCharCode(commands[len++]);
+					context.fillStyle = s;
+				break;
+				case 4: // drawRectangle
+					context.beginPath();
+					context.rect(commands[len++] + 0.5, commands[len++] + 0.5, commands[len++] - 1, commands[len++] - 1);
+					context.closePath();
+
+					context.stroke();
+					context.fill();
+				break;
+				case 5: // drawText
+					// FIXME
+					var x = commands[len++];
+					var y = commands[len++];
+					var s = "";
+					var slen = commands[len++];
+					for(var i = 0; i < slen; i++)
+						s += String.fromCharCode(commands[len++]);
+
+					context.font = "18px sans-serif";
+					context.strokeText(s, x, y);
+				break;
+				case 6: // drawCircle
+					context.beginPath();
+					context.arc(commands[len++], commands[len++], commands[len++], 0, 2 * Math.PI, false);
+					context.closePath();
+					context.fill();
+					context.stroke();
+				break;
+				case 7: // drawLine
+					context.beginPath();
+					context.moveTo(commands[len++] + 0.5, commands[len++] + 0.5);
+					context.lineTo(commands[len++] + 0.5, commands[len++] + 0.5);
+					context.closePath();
+
+					context.stroke();
+				break;
+				default: throw new Error("unknown command from sdpy bridge");
+			}
+		}
+
+		context.restore();
+
+	}
     }
 };

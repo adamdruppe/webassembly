@@ -14,31 +14,219 @@ private extern extern(C) ubyte __heap_base;
 private extern extern(C) ubyte __data_end;
 
 // llvm intrinsics {
+	/+
+		mem must be 0 (it is index of memory thing)
+		delta is in 64 KB pages
+		return OLD size in 64 KB pages, or size_t.max if it failed.
+	+/
 	pragma(LDC_intrinsic, "llvm.wasm.memory.grow.i32")
 	private int llvm_wasm_memory_grow(int mem, int delta);
 
 
+	// in 64 KB pages
 	pragma(LDC_intrinsic, "llvm.wasm.memory.size.i32")
 	private int llvm_wasm_memory_size(int mem);
 // }
 
 
 
-private ubyte* nextFree;
-private size_t memorySize;
+private __gshared ubyte* nextFree;
+private __gshared size_t memorySize; // in units of 64 KB pages
 
-ubyte[] malloc(size_t sz) {
+align(16)
+private struct AllocatedBlock {
+	enum Magic = 0x731a_9bec;
+	enum Flags {
+		inUse = 1,
+		unique = 2,
+	}
+
+	size_t blockSize;
+	size_t flags;
+	size_t magic;
+	size_t checksum;
+
+	size_t used; // the amount actually requested out of the block; used for assumeSafeAppend
+
+	/* debug */
+	string file;
+	size_t line;
+
+	// note this struct MUST align each alloc on an 8 byte boundary or JS is gonna throw bullshit
+
+	void populateChecksum() {
+		checksum = blockSize ^ magic;
+	}
+
+	bool checkChecksum() const {
+		return magic == Magic && checksum == (blockSize ^ magic);
+	}
+
+	ubyte[] dataSlice() return {
+		return ((cast(ubyte*) &this) + typeof(this).sizeof)[0 .. blockSize];
+	}
+
+	static int opApply(scope int delegate(AllocatedBlock*) dg) {
+		if(nextFree is null)
+			return 0;
+		ubyte* next = &__heap_base;
+		AllocatedBlock* block = cast(AllocatedBlock*) next;
+		while(block.checkChecksum()) {
+			if(auto result = dg(block))
+				return result;
+			next += AllocatedBlock.sizeof;
+			next += block.blockSize;
+			block = cast(AllocatedBlock*) next;
+		}
+
+		return 0;
+	}
+}
+
+static assert(AllocatedBlock.sizeof % 16 == 0);
+
+void free(ubyte* ptr) {
+	auto block = (cast(AllocatedBlock*) ptr) - 1;
+	if(!block.checkChecksum())
+		arsd.webassembly.abort();
+
+	block.used = 0;
+	block.flags = 0;
+
+	// last one
+	if(ptr + block.blockSize == nextFree) {
+		nextFree = cast(ubyte*) block;
+		assert(cast(size_t)nextFree % 16 == 0);
+	}
+}
+
+ubyte[] realloc(ubyte* ptr, size_t newSize) {
+	if(ptr is null)
+		return malloc(newSize);
+
+	auto block = (cast(AllocatedBlock*) ptr) - 1;
+	if(!block.checkChecksum())
+		arsd.webassembly.abort();
+
+	// block.populateChecksum();
+	if(newSize <= block.blockSize) {
+		block.used = newSize;
+		return ptr[0 .. newSize];
+	} else {
+		// FIXME: see if we can extend teh block into following free space before resorting to malloc
+
+		if(ptr + block.blockSize == nextFree) {
+			while(growMemoryIfNeeded(newSize)) {}
+
+			block.blockSize = newSize + newSize % 16;
+			block.used = newSize;
+			block.populateChecksum();
+			nextFree = ptr + block.blockSize;
+			assert(cast(size_t)nextFree % 16 == 0);
+			return ptr[0 .. newSize];
+		}
+
+		auto newThing = malloc(newSize);
+		newThing[0 .. block.used] = ptr[0 .. block.used];
+
+		if(block.flags & AllocatedBlock.Flags.unique) {
+			// if we do malloc, this means we are allowed to free the existing block
+			free(ptr);
+		}
+
+		assert(cast(size_t) newThing.ptr % 16 == 0);
+
+		return newThing;
+	}
+}
+
+private bool growMemoryIfNeeded(size_t sz) {
+	if(cast(size_t) nextFree + AllocatedBlock.sizeof + sz >= memorySize * 64*1024) {
+		if(llvm_wasm_memory_grow(0, 4) == size_t.max)
+			assert(0); // out of memory
+
+		memorySize = llvm_wasm_memory_size(0);
+
+		return true;
+	}
+
+	return false;
+}
+
+ubyte[] malloc(size_t sz, string file = __FILE__, size_t line = __LINE__) {
 	// lol bumping that pointer
 	if(nextFree is null) {
-		nextFree = &__heap_base;
+		nextFree = &__heap_base; // seems to be 75312
+		assert(cast(size_t)nextFree % 16 == 0);
 		memorySize = llvm_wasm_memory_size(0);
 	}
 
+	while(growMemoryIfNeeded(sz)) {}
+
+	auto base = cast(AllocatedBlock*) nextFree;
+
+	auto blockSize = sz;
+	if(auto val = blockSize % 16)
+	blockSize += 16 - val; // does NOT include this metadata section!
+
+	// debug list allocations
+	//import std.stdio; writeln(file, ":", line, " / ", sz, " +", blockSize);
+
+	base.blockSize = blockSize;
+	base.flags = AllocatedBlock.Flags.inUse;
+	// these are just to make it more reliable to detect this header by backtracking through the pointer from a random array.
+	// otherwise it'd prolly follow the linked list from the beginning every time or make a free list or something. idk tbh.
+	base.magic = AllocatedBlock.Magic;
+	base.populateChecksum();
+
+	base.used = sz;
+
+	// debug
+	base.file = file;
+	base.line = line;
+
+	nextFree += AllocatedBlock.sizeof;
+
 	auto ret = nextFree;
 
-	nextFree += sz;
+	nextFree += blockSize;
+
+	//writeln(cast(size_t) nextFree);
+	//import std.stdio; writeln(cast(size_t) ret, " of ", sz, " rounded to ", blockSize);
+	//writeln(file, ":", line);
+	assert(cast(size_t) ret % 8 == 0);
 
 	return ret[0 .. sz];
+}
+
+void reserve(T)(ref T[] arr, size_t length) {
+	arr = (cast(T*) (malloc(length * T.sizeof).ptr))[0 .. 0];
+}
+
+// debug
+export extern(C) void printBlockDebugInfo(void* ptr) {
+	if(ptr is null) {
+		foreach(block; AllocatedBlock) {
+			printBlockDebugInfo(block);
+		}
+		return;
+	}
+
+	// otherwise assume it is a pointer returned from malloc
+
+	auto block = (cast(AllocatedBlock*) ptr) - 1;
+	if(ptr is null)
+		block = cast(AllocatedBlock*) &__heap_base;
+
+	printBlockDebugInfo(block);
+}
+
+// debug
+void printBlockDebugInfo(AllocatedBlock* block) {
+	import std.stdio;
+	writeln(block.blockSize, " ", block.flags, " ", block.checkChecksum() ? "OK" : "X", " ");
+	if(block.checkChecksum())
+		writeln(cast(size_t)((cast(ubyte*) (block + 2)) + block.blockSize), " ", block.file, " : ", block.line);
 }
 
 export extern(C) ubyte* bridge_malloc(size_t sz) {
@@ -193,10 +381,54 @@ extern(C) void[] _d_newarrayT(const TypeInfo ti, size_t length) {
 	return malloc(length * ti.size); // FIXME size actually depends on ti
 }
 
+
+AllocatedBlock* getAllocatedBlock(void* ptr) {
+	auto block = (cast(AllocatedBlock*) ptr) - 1;
+	if(!block.checkChecksum())
+		return null;
+	return block;
+}
+
+/++
+	Marks the memory block as OK to append in-place if possible.
++/
+void assumeSafeAppend(T)(T[] arr) {
+	auto block = getAllocatedBlock(arr.ptr);
+	if(block is null) assert(0);
+
+	block.used = arr.length;
+}
+
+/++
+	Marks the memory block associated with this array as unique, meaning
+	the runtime is allowed to free the old block immediately instead of
+	keeping it around for other lingering slices.
+
+	In real D, the GC would take care of this but here I have to hack it.
+
+	arsd.webasm extension
++/
+void assumeUniqueReference(T)(T[] arr) {
+	auto block = getAllocatedBlock(arr.ptr);
+	if(block is null) assert(0);
+
+	block.flags |= AllocatedBlock.Flags.unique;
+}
+
 template _d_arraysetlengthTImpl(Tarr : T[], T) {
 	size_t _d_arraysetlengthT(return scope ref Tarr arr, size_t newlength) {
-		auto ptr = cast(T*) malloc(newlength * T.sizeof);
-		arr = ptr[0 .. newlength];
+		auto orig = arr;
+
+		if(newlength <= arr.length) {
+			arr = arr[0 ..newlength];
+		} else {
+			auto ptr = cast(T*) realloc(cast(ubyte*) arr.ptr, newlength * T.sizeof);
+			arr = ptr[0 .. newlength];
+			if(orig !is null) {
+				arr[0 .. orig.length] = orig[];
+			}
+		}
+
 		return newlength;
 	}
 }
@@ -206,7 +438,11 @@ extern (C) byte[] _d_arrayappendcTX(const TypeInfo ti, ref byte[] px, size_t n) 
 	auto newLength = n + px.length;
 	auto newSize = newLength * elemSize;
 	//import std.stdio; writeln(newSize, " ", newLength);
-	auto ptr = cast(byte*) malloc(newSize);
+	ubyte* ptr;
+	if(px.ptr is null)
+		ptr = malloc(newSize).ptr;
+	else // FIXME: anti-stomping by checking length == used
+		ptr = realloc(cast(ubyte*) px.ptr, newSize).ptr;
 	auto ns = ptr[0 .. newSize];
 	auto op = px.ptr;
 	auto ol = px.length * elemSize;
@@ -283,7 +519,7 @@ class TypeInfo_Struct : TypeInfo {
 	void[] m_init;
 	void* xtohash;
 	void* xopequals;
-	void* xopcmp;
+	int      function(in void*, in void*) xopCmp;
 	void* xtostring;
 	uint flags;
 	union {
@@ -296,4 +532,41 @@ class TypeInfo_Struct : TypeInfo {
 	override size_t size() const { return m_init.length; }
 }
 
+extern(C) bool _xopCmp(in void*, in void*) { return false; }
+
 // }
+
+TTo[] __ArrayCast(TFrom, TTo)(return scope TFrom[] from)
+{
+    const fromSize = from.length * TFrom.sizeof;
+    const toLength = fromSize / TTo.sizeof;
+
+    if ((fromSize % TTo.sizeof) != 0)
+    {
+        //onArrayCastError(TFrom.stringof, fromSize, TTo.stringof, toLength * TTo.sizeof);
+	import arsd.webassembly;
+	abort();
+    }
+
+    struct Array
+    {
+        size_t length;
+        void* ptr;
+    }
+    auto a = cast(Array*)&from;
+    a.length = toLength; // jam new length
+    return *cast(TTo[]*)a;
+}
+
+extern (C) void[] _d_arrayappendT(const TypeInfo ti, ref byte[] x, byte[] y)
+{
+    auto length = x.length;
+    auto tinext = ti.next;
+    auto sizeelem = tinext./*t*/size;              // array element size
+    _d_arrayappendcTX(ti, x, y.length);
+    memcpy(x.ptr + length * sizeelem, y.ptr, y.length * sizeelem);
+
+    // do postblit
+    //__doPostblit(x.ptr + length * sizeelem, y.length * sizeelem, tinext);
+    return x;
+}

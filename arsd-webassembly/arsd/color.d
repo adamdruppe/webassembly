@@ -115,7 +115,110 @@ struct Size {
 nothrow @safe @nogc pure
 double absInternal(double a) { return a < 0 ? -a : a; }
 
-struct Rectangle {}
+struct Rectangle {
+	int left; ///
+	int top; ///
+	int right; ///
+	int bottom; ///
+
+	pure const nothrow @safe @nogc:
+
+	///
+	this(int left, int top, int right, int bottom) {
+		this.left = left;
+		this.top = top;
+		this.right = right;
+		this.bottom = bottom;
+	}
+
+	///
+	this(in Point upperLeft, in Point lowerRight) {
+		this(upperLeft.x, upperLeft.y, lowerRight.x, lowerRight.y);
+	}
+
+	///
+	this(in Point upperLeft, in Size size) {
+		this(upperLeft.x, upperLeft.y, upperLeft.x + size.width, upperLeft.y + size.height);
+	}
+
+	///
+	@property Point upperLeft() {
+		return Point(left, top);
+	}
+
+	///
+	@property Point upperRight() {
+		return Point(right, top);
+	}
+
+	///
+	@property Point lowerLeft() {
+		return Point(left, bottom);
+	}
+
+	///
+	@property Point lowerRight() {
+		return Point(right, bottom);
+	}
+
+	///
+	@property Point center() {
+		return Point((right + left) / 2, (bottom + top) / 2);
+	}
+
+	///
+	@property Size size() {
+		return Size(width, height);
+	}
+
+	///
+	@property int width() {
+		return right - left;
+	}
+
+	///
+	@property int height() {
+		return bottom - top;
+	}
+
+	/// Returns true if this rectangle entirely contains the other
+	bool contains(in Rectangle r) {
+		return contains(r.upperLeft) && contains(r.lowerRight);
+	}
+
+	/// ditto
+	bool contains(in Point p) {
+		return (p.x >= left && p.x < right && p.y >= top && p.y < bottom);
+	}
+
+	/// Returns true of the two rectangles at any point overlap
+	bool overlaps(in Rectangle r) {
+		// the -1 in here are because right and top are exclusive
+		return !((right-1) < r.left || (r.right-1) < left || (bottom-1) < r.top || (r.bottom-1) < top);
+	}
+
+	/++
+		Returns a Rectangle representing the intersection of this and the other given one.
+
+		History:
+			Added July 1, 2021
+	+/
+	Rectangle intersectionOf(in Rectangle r) {
+		auto tmp = Rectangle(max(left, r.left), max(top, r.top), min(right, r.right), min(bottom, r.bottom));
+		if(tmp.left >= tmp.right || tmp.top >= tmp.bottom)
+			tmp = Rectangle.init;
+
+		return tmp;
+	}
+}
+
+private int max(int a, int b) @nogc nothrow pure @safe {
+	return a >= b ? a : b;
+}
+private int min(int a, int b) @nogc nothrow pure @safe {
+	return a <= b ? a : b;
+}
+
 
 enum arsd_jsvar_compatible = "arsd_jsvar_compatible";
 class MemoryImage {}

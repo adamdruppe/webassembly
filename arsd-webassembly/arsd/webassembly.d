@@ -18,6 +18,8 @@ extern(C) int acquire(int returnType, string callingModuleName, string code, Acq
 
 extern(C) void abort();
 
+extern(C) int monotimeNow();
+
 
 // }
 

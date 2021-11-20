@@ -83,7 +83,7 @@ void handler(Cgi cgi) {
 	}
 
 	if(!exists("../" ~ path ~ ".wasm") || cgi.requestMethod == Cgi.RequestMethod.POST) {
-		auto res = executeShell("timeout -k 1s 1s ldc2 --fvisibility=hidden -i=. -i=std -Iarsd-webassembly/ -L-allow-undefined -of"~path~".wasm -mtriple=wasm32-unknown-unknown-wasm "~path~".d arsd-webassembly/object.d",
+		auto res = executeShell("timeout -k 1s 1s ldc2 --fvisibility=hidden -i=. -i=core -i=std -Iarsd-webassembly/ -L-allow-undefined -of"~path~".wasm -mtriple=wasm32-unknown-unknown-wasm "~path~".d arsd-webassembly/object.d",
 			null,
 			Config.none,
 			64_000,

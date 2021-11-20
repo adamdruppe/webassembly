@@ -27,6 +27,7 @@
 		.then(function(obj) {
 			memory = obj.instance.exports.memory;
 			bridge_malloc = obj.instance.exports.bridge_malloc;
+			printBlockDebugInfo = obj.instance.exports.printBlockDebugInfo;
 			exports = obj.instance.exports;
 			obj.instance.exports._start();
 		});

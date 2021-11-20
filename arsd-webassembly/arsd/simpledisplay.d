@@ -6,6 +6,8 @@ import arsd.webassembly;
 
 //shared static this() { eval("hi there"); }
 
+// the js bridge is SO EXPENSIVE we have to minimize using it.
+
 class SimpleWindow {
 	this(int width, int height, string title = "D Application") {
 		this.width = width;
@@ -21,9 +23,14 @@ class SimpleWindow {
 			s.appendChild(canvas);
 			return canvas;
 		}, width, height, title);
+
+		canvasContext = eval!NativeHandle(q{
+			return $0.getContext("2d");
+		}, element);
 	}
 
 	NativeHandle element;
+	NativeHandle canvasContext;
 	int width;
 	int height;
 
@@ -31,6 +38,8 @@ class SimpleWindow {
 		eval(q{ clearInterval($0); }, intervalId);
 		intervalId = 0;
 	}
+
+	void delegate() onClosing;
 
 	ScreenPainter draw() {
 		return ScreenPainter(this);
@@ -100,7 +109,8 @@ export extern(C) void sdpy_key_trigger(int pressed, int key) {
 	KeyEvent ke;
 	ke.pressed = pressed ? true : false;
 	ke.key = key;
-	sdpy_key(ke);
+	if(sdpy_key)
+		sdpy_key(ke);
 }
 export extern(C) void sdpy_mouse_trigger(int pressed, int button, int x, int y) {
 	MouseEvent me;
@@ -119,9 +129,15 @@ export extern(C) void sdpy_mouse_trigger(int pressed, int button, int x, int y) 
 	}
 	me.x = x;
 	me.y = y;
-	sdpy_mouse(me);
+	if(sdpy_mouse)
+		sdpy_mouse(me);
 
 }
+
+
+// push arguments in reverse order then push the command
+enum canvasRender = q{
+};
 
 struct ScreenPainter {
 	this(SimpleWindow window) {
@@ -130,9 +146,7 @@ struct ScreenPainter {
 		this.h = window.height;
 
 		this.element = NativeHandle(window.element.handle, false);
-		this.context = eval!NativeHandle(q{
-			return $0.getContext("2d");
-		}, element);
+		this.context = NativeHandle(window.canvasContext.handle, false);
 	}
 	@disable this(this); // for now...
 	NativeHandle element;
@@ -141,21 +155,22 @@ struct ScreenPainter {
 	private int w, h;
 
 	void clear() {
-		eval(q{
-			var context = $0;
-			context.clearRect(0, 0, $1, $2);
-		}, context, w, h);
+		addCommand(1);
 	}
 
 	void outlineColor(Color c) {
 		char[7] data;
 		c.toTempString(data[]);
-		context.properties.strokeStyle!string = cast(immutable)(data[]);
+		addCommand(2, 7, data[0], data[1], data[2], data[3], data[4], data[5], data[6]);
+		return;
+		//context.properties.strokeStyle!string = cast(immutable)(data[]);
 	}
 	void fillColor(Color c) {
 		char[7] data;
 		c.toTempString(data[]);
-		context.properties.fillStyle!string = cast(immutable)(data[]);
+		addCommand(3, 7, data[0], data[1], data[2], data[3], data[4], data[5], data[6]);
+		return;
+		//context.properties.fillStyle!string = cast(immutable)(data[]);
 	}
 
 	/*
@@ -181,20 +196,17 @@ struct ScreenPainter {
 	*/
 
 	void drawRectangle(Point p, int w, int h) {
-		eval(q{
-			var context = $0;
-			context.beginPath();
-			context.rect($1 + 0.5, $2 + 0.5, $3 - 1, $4 - 1);
-			context.closePath();
-
-			context.stroke();
-			context.fill();
-		}, context, p.x, p.y, w, h);
+		addCommand(4, p.x, p.y, w, h);
 	}
 	void drawRectangle(Point p, Size s) {
 		drawRectangle(p, s.width, s.height);
 	}
 	void drawText(Point p, in char[] txt, Point lowerRight = Point(0, 0), uint alignment = 0) {
+		// FIXME use the new system
+		addCommand(5, p.x, p.y + 16, txt.length);
+		foreach(c; txt)
+			push(cast(double) c);
+		return;
 		eval(q{
 			var context = $0;
 			context.font = "18px sans-serif";
@@ -203,14 +215,7 @@ struct ScreenPainter {
 	}
 
 	void drawCircle(Point upperLeft, int diameter) {
-		eval(q{
-			var context = $0;
-			context.beginPath();
-			context.arc($1, $2, $3, 0, 2 * Math.PI, false);
-			context.closePath();
-			context.fill();
-			context.stroke();
-		}, context, upperLeft.x + diameter / 2, upperLeft.y + diameter / 2, diameter / 2);
+		addCommand(6, upperLeft.x + diameter / 2, upperLeft.y + diameter / 2, diameter / 2);
 	}
 
 	void drawLine(Point p1, Point p2) {
@@ -218,23 +223,37 @@ struct ScreenPainter {
 	}
 
 	void drawLine(int x1, int y1, int x2, int y2) {
-		/*
-		console.log($1);
-		console.log($2);
-		console.log($3);
-		console.log($4);
-		*/
-		eval(q{
-			var context = $0;
-			context.beginPath();
-			context.moveTo($1 + 0.5, $2 + 0.5);
-			context.lineTo($3 + 0.5, $4 + 0.5);
-			context.closePath();
+		addCommand(7, x1, y1, x2, y2);
+	}
 
-			context.stroke();
-		}, context, x1, y1, x2, y2);
+	private:
+	void addCommand(T...)(int cmd, T args) {
+		push(cmd);
+		foreach(arg; args) {
+			push(arg);
+		}
+	}
+
+	// 50ish % on ronaroids total cpu without this
+	// with it, we at like 16%
+	static __gshared double[] commandStack;
+	size_t commandStackPosition;
+
+	void push(T)(T t) {
+		if(commandStackPosition == commandStack.length) {
+			commandStack.length = commandStack.length + 1024;
+			commandStack.assumeUniqueReference();
+		}
+
+		commandStack[commandStackPosition++] = t;
+	}
+
+	~this() {
+		executeCanvasCommands(this.context.handle, this.commandStack.ptr, commandStackPosition);
 	}
 }
+
+extern(C) void executeCanvasCommands(int handle, double* start, size_t len);
 
 struct KeyEvent {
 	int key;
