@@ -542,6 +542,8 @@ class TypeInfo_Const : TypeInfo {
 	TypeInfo base;
 	override size_t size() const { return base.size; }
 	override const(TypeInfo) next() const { return base; }
+	
+	override bool equals(void* p1, void* p2) { return base.equals(p1, p2); 	}
 }
 /+
 class TypeInfo_Immutable : TypeInfo {
