@@ -510,11 +510,12 @@ static foreach(type; AliasSeq!(byte, char, dchar, double, float, int, long, shor
 
 				static if(is(type == void))
 					return false;
-				else
-				foreach(idx, item; a)
-					if(item != b[idx])
-						return false;
-				return true;
+				else {
+					foreach(idx, item; a)
+						if(item != b[idx])
+							return false;
+					return true;
+				}
 			}
 		}
 	});
