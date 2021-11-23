@@ -272,8 +272,11 @@ extern(C) void* memset(void* s, int c, size_t n) {
 pragma(LDC_intrinsic, "llvm.memcpy.p0i8.p0i8.i#")
     void llvm_memcpy(T)(void* dst, const(void)* src, T len, bool volatile_ = false);
 
-export extern(C) void* memcpy(void* dest, const void* src, size_t n) {
-	llvm_memcpy(dest, src, n);
+extern(C) void *memcpy(void* dest, const(void)* src, size_t n)
+{
+	ubyte *d = cast(ubyte*) dest;
+	const (ubyte) *s = cast(const(ubyte)*)src;
+	for (; n; n--) *d++ = *s++;
 	return dest;
 }
 
