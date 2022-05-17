@@ -264,6 +264,7 @@ extern(C) void* memset(void* s, int c, size_t n) {
 	auto d = cast(ubyte*) s;
 	while(n) {
 		*d = cast(ubyte) c;
+		d++;
 		n--;
 	}
 	return s;
