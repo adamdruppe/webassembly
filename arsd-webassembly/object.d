@@ -260,6 +260,22 @@ extern(C) void _d_arraybounds(string file, size_t line) { //, size_t lwr, size_t
 	arsd.webassembly.abort();
 }
 
+
+/// Called when an out of range slice of an array is created
+extern(C) void _d_arraybounds_slice(string file, uint line, size_t, size_t, size_t)
+{
+    // Ignore additional information for now
+    _d_arraybounds(file, line);
+}
+
+/// Called when an out of range array index is accessed
+extern(C) void _d_arraybounds_index(string file, uint line, size_t, size_t)
+{
+    // Ignore additional information for now
+    _d_arraybounds(file, line);
+}
+
+
 extern(C) void* memset(void* s, int c, size_t n) {
 	auto d = cast(ubyte*) s;
 	while(n) {
@@ -297,6 +313,13 @@ int memcmp(const(void)* s1, const(void*) s2, size_t n) {
 
 extern(C) void _d_assert(string file, uint line) {
 	arsd.webassembly.eval(q{ console.error("Assert failure: " + $0 + ":" + $1); /*, "[" + $2 + ".." + $3 + "] <> " + $4);*/ }, file, line);//, lwr, upr, length);
+	arsd.webassembly.abort();
+}
+
+extern(C) void _d_assert_msg(string msg, string f, uint l) 
+{
+	_d_assert(f, l);
+	// arsd.webassembly.eval(q{ console.error("Assert failure: " + $0 + ":" + $1); /*, "[" + $2 + ".." + $3 + "] <> " + $4);*/ }, file, line);//, lwr, upr, length);
 	arsd.webassembly.abort();
 }
 
@@ -360,32 +383,112 @@ extern(C) void* _d_allocmemory(size_t sz) {
 	return malloc(sz).ptr;
 }
 
-class Object {}
+class Object
+{
+	/// Convert Object to human readable string
+	string toString() { return "Object"; }
+	/// Compute hash function for Object
+	size_t toHash() @trusted nothrow
+	{
+		auto addr = cast(size_t)cast(void*)this;
+		return addr ^ (addr >>> 4);
+	}
+	
+    /// Compare against another object. NOT IMPLEMENTED!
+	int opCmp(Object o) { assert(false, "not implemented"); }
+    /// Check equivalence againt another object
+	bool opEquals(Object o) { return this is o; }
+}
+
+/// Compare to objects
+bool opEquals(Object lhs, Object rhs)
+{
+    // If aliased to the same object or both null => equal
+    if (lhs is rhs) return true;
+
+    // If either is null => non-equal
+    if (lhs is null || rhs is null) return false;
+
+    if (!lhs.opEquals(rhs)) return false;
+
+    // If same exact type => one call to method opEquals
+    if (typeid(lhs) is typeid(rhs) ||
+        !__ctfe && typeid(lhs).opEquals(typeid(rhs)))
+            /* CTFE doesn't like typeid much. 'is' works, but opEquals doesn't
+            (issue 7147). But CTFE also guarantees that equal TypeInfos are
+            always identical. So, no opEquals needed during CTFE. */
+    {
+        return true;
+    }
+
+    // General case => symmetric calls to method opEquals
+    return rhs.opEquals(lhs);
+}
+/************************
+* Returns true if lhs and rhs are equal.
+*/
+bool opEquals(const Object lhs, const Object rhs)
+{
+    // A hack for the moment.
+    return opEquals(cast()lhs, cast()rhs);
+}
+
 class TypeInfo {
-	const(TypeInfo) next() const { return this; }
+	const(TypeInfo) next() const { return null; }
 	size_t size() const { return 1; }
 
-	bool equals(void* a, void* b) { return false; }
+	bool equals(void* p1, void* p2) { return p1 == p2; }
+
+	/**
+	* Return default initializer.  If the type should be initialized to all
+	* zeros, an array with a null ptr and a length equal to the type size will
+	* be returned. For static arrays, this returns the default initializer for
+	* a single element of the array, use `tsize` to get the correct size.
+	*/
+    abstract const(void)[] initializer() nothrow pure const @safe @nogc;
 }
-class TypeInfo_Class : TypeInfo {
-	ubyte[] m_init;
-	string name;
-	void*[] vtbl;
-	Interface*[] interfaces;
+
+class TypeInfo_Class : TypeInfo 
+{
+	ubyte[] m_init; /// class static initializer (length gives class size)
+	string name; /// name of class
+	void*[] vtbl; // virtual function pointer table
+	Interface[] interfaces;
 	TypeInfo_Class base;
-	void* dtor;
-	void function(Object) ci;
+	void* destructor;
+	void function(Object) classInvariant;
 	uint flags;
 	void* deallocator;
-	void*[] offti;
-	void function(Object) dctor;
+	void*[] offTi;
+	void function(Object) defaultConstructor;
 	immutable(void)* rtInfo;
 
-	override size_t size() const { return size_t.sizeof; }
-}
+	override @property size_t size() nothrow pure const
+    { return Object.sizeof; }
 
-class TypeInfo_Pointer : TypeInfo {
-	TypeInfo m_next;
+	override bool equals(in void* p1, in void* p2) const
+    {
+        Object o1 = *cast(Object*)p1;
+        Object o2 = *cast(Object*)p2;
+
+        return (o1 is o2) || (o1 && o1.opEquals(o2));
+    }
+
+	override const(void)[] initializer() nothrow pure const @safe
+    {
+        return m_init;
+    }
+}
+class TypeInfo_Pointer : TypeInfo 
+{ 
+    TypeInfo m_next; 
+
+    override bool equals(void* p1, void* p2) { return *cast(void**)p1 == *cast(void**)p2; }
+    override @property size_t size() nothrow pure const { return (void*).sizeof; }
+
+	override const(void)[] initializer() const @trusted { return (cast(void *)null)[0 .. (void*).sizeof]; }
+
+    override const (TypeInfo) next() const { return m_next; }
 }
 
 class TypeInfo_Array : TypeInfo {
@@ -531,6 +634,16 @@ struct Interface {
 	size_t offset;
 }
 
+/**
+ * Array of pairs giving the offset and type information for each
+ * member in an aggregate.
+ */
+struct OffsetTypeInfo
+{
+    size_t   offset;    /// Offset of member from start of object
+    TypeInfo ti;        /// TypeInfo for this member
+}
+
 class TypeInfo_Aya : TypeInfo_Aa {
 
 }
@@ -539,6 +652,33 @@ class TypeInfo_Delegate : TypeInfo {
 	TypeInfo next;
 	string deco;
 	override size_t size() const { return size_t.sizeof * 2; }
+}
+
+
+//Directly copied from LWDR source.
+class TypeInfo_Interface : TypeInfo 
+{
+	TypeInfo_Class info;
+	
+	override bool equals(in void* p1, in void* p2) const
+    {
+        Interface* pi = **cast(Interface ***)*cast(void**)p1;
+        Object o1 = cast(Object)(*cast(void**)p1 - pi.offset);
+        pi = **cast(Interface ***)*cast(void**)p2;
+        Object o2 = cast(Object)(*cast(void**)p2 - pi.offset);
+
+        return o1 == o2 || (o1 && o1.opCmp(o2) == 0);
+    }
+
+	override const(void)[] initializer() const @trusted
+    {
+        return (cast(void *)null)[0 .. Object.sizeof];
+    }
+
+    override @property size_t size() nothrow pure const
+    {
+        return Object.sizeof;
+    }
 }
 
 class TypeInfo_Const : TypeInfo {
