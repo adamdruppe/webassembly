@@ -457,9 +457,9 @@ class TypeInfo_Class : TypeInfo
 	TypeInfo_Class base;
 	void* destructor;
 	void function(Object) classInvariant;
-	uint m_flags;
+	uint flags;
 	void* deallocator;
-	void*[] m_offTi;
+	void*[] offTi;
 	void function(Object) defaultConstructor;
 	immutable(void)* rtInfo;
 
