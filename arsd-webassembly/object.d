@@ -5,7 +5,9 @@ static import arsd.webassembly;
 
 alias string = immutable(char)[];
 alias wstring = immutable(wchar)[];
+alias dstring = immutable(dchar)[];
 alias size_t = uint;
+alias ptrdiff_t = int;
 
 // ldc defines this, used to find where wasm memory begins
 private extern extern(C) ubyte __heap_base;
@@ -316,14 +318,26 @@ extern(C) void _d_assert(string file, uint line) {
 	arsd.webassembly.abort();
 }
 
-extern(C) void _d_assert_msg(string msg, string f, uint l) 
+extern(C) void _d_assert_msg(string msg, string f, uint l)
 {
 	_d_assert(f, l);
 	// arsd.webassembly.eval(q{ console.error("Assert failure: " + $0 + ":" + $1); /*, "[" + $2 + ".." + $3 + "] <> " + $4);*/ }, file, line);//, lwr, upr, length);
 	arsd.webassembly.abort();
 }
 
-void __switch_error(string file, size_t line) {}
+void __switch_error(string file, size_t line) @nogc nothrow pure @safe {}
+
+bool __equals(T1, T2)(scope const T1[] lhs, scope const T2[] rhs) {
+	if (lhs.length != rhs.length) {
+		return false;
+	}
+	foreach(i; 0..lhs.length) {
+		if (lhs[i] != rhs[i]) {
+			return false;
+		}
+	}
+	return true;
+}
 
 // bare basics class support {
 
@@ -393,7 +407,7 @@ class Object
 		auto addr = cast(size_t)cast(void*)this;
 		return addr ^ (addr >>> 4);
 	}
-	
+
     /// Compare against another object. NOT IMPLEMENTED!
 	int opCmp(Object o) { assert(false, "not implemented"); }
     /// Check equivalence againt another object
@@ -448,7 +462,7 @@ class TypeInfo {
     abstract const(void)[] initializer() nothrow pure const @safe @nogc;
 }
 
-class TypeInfo_Class : TypeInfo 
+class TypeInfo_Class : TypeInfo
 {
 	ubyte[] m_init; /// class static initializer (length gives class size)
 	string name; /// name of class
@@ -479,9 +493,9 @@ class TypeInfo_Class : TypeInfo
         return m_init;
     }
 }
-class TypeInfo_Pointer : TypeInfo 
-{ 
-    TypeInfo m_next; 
+class TypeInfo_Pointer : TypeInfo
+{
+    TypeInfo m_next;
 
     override bool equals(void* p1, void* p2) { return *cast(void**)p1 == *cast(void**)p2; }
     override @property size_t size() nothrow pure const { return (void*).sizeof; }
@@ -518,6 +532,15 @@ class TypeInfo_StaticArray : TypeInfo {
 
 }
 
+class TypeInfo_Enum : TypeInfo {
+    TypeInfo base;
+    string name;
+    void[] m_init;
+
+    override size_t size() const { return base.size; }
+    override const(TypeInfo) next() const { return base.next; }
+    override bool equals(void* p1, void* p2) { return base.equals(p1, p2); }
+}
 
 extern(C) void[] _d_newarrayT(const TypeInfo ti, size_t length) {
 	return malloc(length * ti.size); // FIXME size actually depends on ti
@@ -558,7 +581,7 @@ void assumeUniqueReference(T)(T[] arr) {
 }
 
 template _d_arraysetlengthTImpl(Tarr : T[], T) {
-	size_t _d_arraysetlengthT(return scope ref Tarr arr, size_t newlength) {
+	size_t _d_arraysetlengthT(return scope ref Tarr arr, size_t newlength) @trusted {
 		auto orig = arr;
 
 		if(newlength <= arr.length) {
@@ -656,10 +679,10 @@ class TypeInfo_Delegate : TypeInfo {
 
 
 //Directly copied from LWDR source.
-class TypeInfo_Interface : TypeInfo 
+class TypeInfo_Interface : TypeInfo
 {
 	TypeInfo_Class info;
-	
+
 	override bool equals(in void* p1, in void* p2) const
     {
         Interface* pi = **cast(Interface ***)*cast(void**)p1;
@@ -686,7 +709,7 @@ class TypeInfo_Const : TypeInfo {
 	TypeInfo base;
 	override size_t size() const { return base.size; }
 	override const(TypeInfo) next() const { return base.next; }
-	
+
 	override bool equals(void* p1, void* p2) { return base.equals(p1, p2); 	}
 }
 /+
@@ -795,3 +818,20 @@ extern (C) int _adEq2(void[] a1, void[] a2, TypeInfo ti)
     return 1;
 }
 
+T[] dup(T)(scope const(T)[] array) pure nothrow @trusted if (__traits(isPOD, T))
+{
+	T[] result;
+	foreach(ref e; array) {
+		result ~= e;
+	}
+	return result;
+}
+
+immutable(T)[] idup(T)(scope const(T)[] array) pure nothrow @trusted
+{
+	immutable(T)[] result;
+	foreach(ref e; array) {
+		result ~= e;
+	}
+	return result;
+}
