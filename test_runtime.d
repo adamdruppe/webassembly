@@ -62,5 +62,19 @@ void main()
 	Tester[] t = new Tester[10];
 	assert(t[0] == Tester.init);
 	assert(t.length == 10);
+
+	switch("hello")
+	{
+		case "test":
+			writeln("broken");
+			break;
+		case "hello":
+			writeln("Working switch string");
+			break;
+		default: writeln("What happenned here?");
+	}
+	string strTest = "test"[0..$];
+	assert(strTest == "test");
+
 }
 
