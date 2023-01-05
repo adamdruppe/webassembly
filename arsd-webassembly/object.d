@@ -206,6 +206,14 @@ ubyte[] malloc(size_t sz, string file = __FILE__, size_t line = __LINE__) {
 	return ret[0 .. sz];
 }
 
+
+ubyte[] calloc(size_t count, size_t size, string file = __FILE__, size_t line = __LINE__) 
+{
+	auto ret = malloc(count*size,file,line);
+	ret[0..$] = 0;
+	return ret;
+}
+
 void reserve(T)(ref T[] arr, size_t length) {
 	arr = (cast(T*) (malloc(length * T.sizeof).ptr))[0 .. 0];
 }
@@ -705,11 +713,28 @@ bool opEquals(const Object lhs, const Object rhs)
     return opEquals(cast()lhs, cast()rhs);
 }
 
-class TypeInfo {
+class TypeInfo 
+{
+	override string toString() const @safe nothrow
+    {
+        return typeid(this).name;
+    }
+
 	const(TypeInfo) next()nothrow pure inout @nogc  { return null; }
 	size_t size() nothrow pure const @safe @nogc { return 0; }
 
-	bool equals(void* p1, void* p2) { return p1 == p2; }
+	bool equals(in void* p1, in void* p2) const { return p1 == p2; }
+
+	override size_t toHash() @trusted const nothrow
+    {
+        return hashOf(this.toString());
+    }
+
+
+	size_t getHash(scope const void* p) @trusted nothrow const
+	{
+		return hashOf(p);
+	}
 
 	/**
 	* Return default initializer.  If the type should be initialized to all
@@ -721,6 +746,13 @@ class TypeInfo {
 	{
 		return (cast(const(void)*) null)[0 .. typeof(null).sizeof];
 	}
+
+	@property uint flags() nothrow pure const @safe @nogc { return 0; }
+	/// Run the destructor on the object and all its sub-objects
+    void destroy(void* p) const {}
+    /// Run the postblit on the object and all its sub-objects
+    void postblit(void* p) const {}
+
 	@property size_t talign() nothrow pure const { return size; }
 }
 
@@ -755,11 +787,26 @@ class TypeInfo_Class : TypeInfo
         return m_init;
     }
 }
+
+void destroy(bool initialize = true, T)(ref T obj) if (is(T == struct))
+{
+    import core.internal.destruction : destructRecurse;
+
+    destructRecurse(obj);
+
+    static if (initialize)
+    {
+        import core.internal.lifetime : emplaceInitializer;
+        emplaceInitializer(obj); // emplace T.init
+    }
+}
+
+
 class TypeInfo_Pointer : TypeInfo
 {
     TypeInfo m_next;
 
-    override bool equals(void* p1, void* p2) { return *cast(void**)p1 == *cast(void**)p2; }
+    override bool equals(in void* p1, in void* p2) const { return *cast(void**)p1 == *cast(void**)p2; }
     override @property size_t size() nothrow pure const { return (void*).sizeof; }
 
 	override const(void)[] initializer() const @trusted { return (cast(void *)null)[0 .. (void*).sizeof]; }
@@ -772,7 +819,7 @@ class TypeInfo_Array : TypeInfo {
 	override size_t size() const { return (void[]).sizeof; }
 	override const(TypeInfo) next() const { return value; }
 
-	override bool equals(void* p1, void* p2)
+	override bool equals(in void* p1, in void* p2) const
     {
         void[] a1 = *cast(void[]*)p1;
         void[] a2 = *cast(void[]*)p2;
@@ -799,7 +846,7 @@ class TypeInfo_StaticArray : TypeInfo {
 	override size_t size() const { return value.size * len; }
 	override const(TypeInfo) next() const { return value; }
 
-	override bool equals(void* p1, void* p2) {
+	override bool equals(in void* p1, in void* p2) const {
 		size_t sz = value.size;
 
 		for (size_t u = 0; u < len; u++)
@@ -818,6 +865,131 @@ class TypeInfo_StaticArray : TypeInfo {
 
 }
 
+import core.arsd.aa;
+
+extern (C)
+{
+    // from druntime/src/rt/aaA.d
+	/* The real type is (non-importable) `rt.aaA.Impl*`;
+		* the compiler uses `void*` for its prototypes.
+		*/
+	private alias AA = void*;
+
+    // size_t _aaLen(in AA aa) pure nothrow @nogc;
+    private void* _aaGetY(scope AA* paa, const TypeInfo_AssociativeArray ti, const size_t valsz, const scope void* pkey);
+    private void* _aaGetX(scope AA* paa, const TypeInfo_AssociativeArray ti, const size_t valsz, const scope void* pkey, out bool found) ;
+    // inout(void)* _aaGetRvalueX(inout AA aa, in TypeInfo keyti, in size_t valsz, in void* pkey);
+    inout(void[]) _aaValues(inout AA aa, const size_t keysz, const size_t valsz, const TypeInfo tiValueArray) ;
+    inout(void[]) _aaKeys(inout AA aa, const size_t keysz, const TypeInfo tiKeyArray) ;
+    void* _aaRehash(AA* paa, const scope TypeInfo keyti) ;
+    void _aaClear(AA aa) ;
+
+    // alias _dg_t = extern(D) int delegate(void*);
+    // int _aaApply(AA aa, size_t keysize, _dg_t dg);
+
+    // alias _dg2_t = extern(D) int delegate(void*, void*);
+    // int _aaApply2(AA aa, size_t keysize, _dg2_t dg);
+
+    private struct AARange { AA impl; size_t idx; }
+    AARange _aaRange(AA aa);
+    bool _aaRangeEmpty(AARange r);
+    void* _aaRangeFrontKey(AARange r);
+    void* _aaRangeFrontValue(AARange r);
+    void _aaRangePopFront(ref AARange r);
+
+    int _aaEqual(scope const TypeInfo tiRaw, scope const AA aa1, scope const AA aa2);
+    size_t _aaGetHash(scope const AA* aa, scope const TypeInfo tiRaw) nothrow;
+
+    /*
+        _d_assocarrayliteralTX marked as pure, because aaLiteral can be called from pure code.
+        This is a typesystem hole, however this is existing hole.
+        Early compiler didn't check purity of toHash or postblit functions, if key is a UDT thus
+        copiler allowed to create AA literal with keys, which have impure unsafe toHash methods.
+    */
+    void* _d_assocarrayliteralTX(const TypeInfo_AssociativeArray ti, void[] keys, void[] values);
+}
+
+
+
+/***********************************
+ * Removes all remaining keys and values from an associative array.
+ * Params:
+ *      aa =     The associative array.
+ */
+void clear(Value, Key)(Value[Key] aa)
+{
+    _aaClear(*cast(AA *) &aa);
+}
+
+/** ditto */
+void clear(Value, Key)(Value[Key]* aa)
+{
+    _aaClear(*cast(AA *) aa);
+}
+void* aaLiteral(Key, Value)(Key[] keys, Value[] values) @trusted pure
+{
+    return _d_assocarrayliteralTX(typeid(Value[Key]), *cast(void[]*)&keys, *cast(void[]*)&values);
+}
+
+alias AssociativeArray(Key, Value) = Value[Key];
+
+class TypeInfo_AssociativeArray : TypeInfo
+{
+    override string toString() const
+    {
+        return value.toString() ~ "[" ~ key.toString() ~ "]";
+    }
+
+    override bool opEquals(Object o)
+    {
+        if (this is o)
+            return true;
+        auto c = cast(const TypeInfo_AssociativeArray)o;
+        return c && this.key == c.key &&
+                    this.value == c.value;
+    }
+
+    override bool equals(in void* p1, in void* p2) @trusted const
+    {
+        return !!_aaEqual(this, *cast(const AA*) p1, *cast(const AA*) p2);
+    }
+
+    override size_t getHash(scope const void* p) nothrow @trusted const
+    {
+        return _aaGetHash(cast(AA*)p, this);
+    }
+
+    // BUG: need to add the rest of the functions
+
+    override @property size_t size() nothrow pure const
+    {
+        return (char[int]).sizeof;
+    }
+
+    override const(void)[] initializer() const @trusted
+    {
+        return (cast(void *)null)[0 .. (char[int]).sizeof];
+    }
+
+    override @property inout(TypeInfo) next() nothrow pure inout { return value; }
+
+    TypeInfo value;
+    TypeInfo key;
+
+    override @property size_t talign() nothrow pure const
+    {
+        return (char[int]).alignof;
+    }
+
+    version (WithArgTypes) override int argTypes(out TypeInfo arg1, out TypeInfo arg2)
+    {
+        arg1 = typeid(void*);
+        return 0;
+    }
+}
+
+
+
 class TypeInfo_Enum : TypeInfo {
     TypeInfo base;
     string name;
@@ -825,7 +997,7 @@ class TypeInfo_Enum : TypeInfo {
 
     override size_t size() const { return base.size; }
     override const(TypeInfo) next() const { return base.next; }
-    override bool equals(void* p1, void* p2) { return base.equals(p1, p2); }
+    override bool equals(in void* p1, in void* p2) const { return base.equals(p1, p2); }
 	override @property size_t talign() const { return base.talign; }
 }
 
@@ -980,7 +1152,7 @@ static foreach(type; AliasSeq!(byte, char, dchar, double, float, int, long, shor
 	mixin(q{
 		class TypeInfo_}~type.mangleof~q{ : TypeInfo {
 			override size_t size() const { return type.sizeof; }
-			override bool equals(void* a, void* b) {
+			override bool equals(in void* a, in void* b) const {
 				static if(is(type == void))
 					return false;
 				else
@@ -999,7 +1171,7 @@ static foreach(type; AliasSeq!(byte, char, dchar, double, float, int, long, shor
 		}
 		class TypeInfo_A}~type.mangleof~q{ : TypeInfo_Array {
 			override const(TypeInfo) next() const { return typeid(type); }
-			override bool equals(void* av, void* bv) {
+			override bool equals(in void* av, in void* bv) const {
 				type[] a = *(cast(type[]*) av);
 				type[] b = *(cast(type[]*) bv);
 
@@ -1085,13 +1257,13 @@ class TypeInfo_Interface : TypeInfo
 }
 
 class TypeInfo_Const : TypeInfo {
-	size_t getHash(in void*) nothrow { return 0; }
+	override size_t getHash(scope const(void*) p) @trusted const nothrow { return base.getHash(p); }
 	TypeInfo base;
 	override size_t size() const { return base.size; }
 	override const(TypeInfo) next() const { return base.next; }
 	override const(void)[] initializer() nothrow pure const{return base.initializer();}
     override @property size_t talign() nothrow pure const { return base.talign; }
-	override bool equals(void* p1, void* p2) { return base.equals(p1, p2); 	}
+	override bool equals(in void* p1, in void* p2) const { return base.equals(p1, p2); 	}
 }
 /+
 class TypeInfo_Immutable : TypeInfo {
@@ -1100,19 +1272,19 @@ class TypeInfo_Immutable : TypeInfo {
 }
 +/
 class TypeInfo_Invariant : TypeInfo {
-	size_t getHash(in void*) nothrow { return 0; }
 	TypeInfo base;
+	override size_t getHash(scope const (void*) p) @trusted const nothrow { return base.getHash(p); }
 	override size_t size() const { return base.size; }
 	override const(TypeInfo) next() const { return base; }
 }
 class TypeInfo_Shared : TypeInfo {
-	size_t getHash(in void*) nothrow { return 0; }
+	override size_t getHash(scope const (void*) p) @trusted const nothrow { return base.getHash(p); }
 	TypeInfo base;
 	override size_t size() const { return base.size; }
 	override const(TypeInfo) next() const { return base; }
 }
 class TypeInfo_Inout : TypeInfo {
-	size_t getHash(in void*) nothrow { return 0; }
+	override size_t getHash(scope const (void*) p) @trusted const nothrow { return base.getHash(p); }
 	TypeInfo base;
 	override size_t size() const { return base.size; }
 	override const(TypeInfo) next() const { return base; }
@@ -1122,20 +1294,27 @@ class TypeInfo_Struct : TypeInfo {
 	string name;
 	void[] m_init;
 	void* xtohash;
-	 bool     function(in void*, in void*) xopEquals;
+	bool     function(in void*, in void*) xopEquals;
 	int      function(in void*, in void*) xopCmp;
 	void* xtostring;
-	uint flags;
+	uint m_flags;
 	union {
-		void function(void*) dtor;
-		void function(void*, const TypeInfo_Struct) xdtor;
+		void function(void*) xdtor;
+		void function(void*, const TypeInfo_Struct) xdtorti;
 	}
-	void function(void*) postblit;
+	void function(void*) xpostblit;
 	uint align_;
 	immutable(void)* rtinfo;
-	override size_t size() const { return m_init.length; }
 
-    override bool equals(in void* p1, in void* p2) @trusted
+	enum StructFlags : uint
+	{
+		hasPointers = 0x1,
+		isDynamicType = 0x2, // built at runtime, needs type info in xdtor
+	}
+	override size_t size() const { return m_init.length; }
+	override @property uint flags() nothrow pure const @safe @nogc { return m_flags; }
+
+    override bool equals(in void* p1, in void* p2) @trusted const
     {
         if (!p1 || !p2)
             return false;
@@ -1148,6 +1327,22 @@ class TypeInfo_Struct : TypeInfo {
             return memcmp(p1, p2, m_init.length) == 0;
     }
 	override @property size_t talign() nothrow pure const { return align_; }
+	final override void destroy(void* p) const
+    {
+        if (xdtor)
+        {
+            if (m_flags & StructFlags.isDynamicType)
+                (*xdtorti)(p, this);
+            else
+                (*xdtor)(p);
+        }
+    }
+
+    override void postblit(void* p) const
+    {
+        if (xpostblit)
+            (*xpostblit)(p);
+    }
 
 	override const(void)[] initializer() nothrow pure const @safe
 	{
@@ -1159,6 +1354,12 @@ class TypeInfo_Struct : TypeInfo {
 extern(C) bool _xopCmp(in void*, in void*) { return false; }
 
 // }
+
+void __ArrayDtor(T)(scope T[] a)
+{
+    foreach_reverse (ref T e; a)
+        e.__xdtor();
+}
 
 TTo[] __ArrayCast(TFrom, TTo)(return scope TFrom[] from)
 {
@@ -1221,4 +1422,17 @@ immutable(T)[] idup(T)(scope const(T)[] array) pure nothrow @trusted
 		result ~= e;
 	}
 	return result;
+}
+
+
+size_t hashOf(T)(auto ref T arg, size_t seed)
+{
+	static import core.internal.hash;
+	return core.internal.hash.hashOf(arg, seed);
+}
+/// ditto
+size_t hashOf(T)(auto ref T arg)
+{
+	static import core.internal.hash;
+	return core.internal.hash.hashOf(arg);
 }
