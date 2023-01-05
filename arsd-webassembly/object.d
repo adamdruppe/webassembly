@@ -449,7 +449,7 @@ bool opEquals(const Object lhs, const Object rhs)
 
 class TypeInfo {
 	const(TypeInfo) next() const { return null; }
-	size_t size() const { return 1; }
+	size_t size() const { return 0; }
 
 	bool equals(void* p1, void* p2) { return p1 == p2; }
 
@@ -459,7 +459,10 @@ class TypeInfo {
 	* be returned. For static arrays, this returns the default initializer for
 	* a single element of the array, use `tsize` to get the correct size.
 	*/
-    abstract const(void)[] initializer() nothrow pure const @safe @nogc;
+    const(void)[] initializer() nothrow pure const @trusted @nogc
+	{
+		return (cast(const(void)*) null)[0 .. typeof(null).sizeof];
+	}
 }
 
 class TypeInfo_Class : TypeInfo
@@ -507,8 +510,24 @@ class TypeInfo_Pointer : TypeInfo
 
 class TypeInfo_Array : TypeInfo {
 	TypeInfo value;
-	override size_t size() const { return 2*size_t.sizeof; }
+	override size_t size() const { return (void[]).sizeof; }
 	override const(TypeInfo) next() const { return value; }
+
+	override bool equals(void* p1, void* p2)
+    {
+        void[] a1 = *cast(void[]*)p1;
+        void[] a2 = *cast(void[]*)p2;
+        if (a1.length != a2.length)
+            return false;
+        size_t sz = value.size;
+        for (size_t i = 0; i < a1.length; i++)
+        {
+            if (!value.equals(a1.ptr + i * sz, a2.ptr + i * sz))
+                return false;
+        }
+        return true;
+    }
+	override const(void)[] initializer() const @trusted { return (cast(void *)null)[0 ..  (void[]).sizeof]; }
 }
 
 class TypeInfo_StaticArray : TypeInfo {
@@ -542,9 +561,19 @@ class TypeInfo_Enum : TypeInfo {
     override bool equals(void* p1, void* p2) { return base.equals(p1, p2); }
 }
 
-extern(C) void[] _d_newarrayT(const TypeInfo ti, size_t length) {
+extern (C) void[] _d_newarrayU(const scope TypeInfo ti, size_t length)
+{
 	return malloc(length * ti.size); // FIXME size actually depends on ti
 }
+
+extern(C) void[] _d_newarrayT(const TypeInfo ti, size_t length)
+{
+	auto arr = _d_newarrayU(ti, length);
+	
+	(cast(byte[])arr)[] = 0;
+	return arr;
+}
+
 
 
 AllocatedBlock* getAllocatedBlock(void* ptr) {
@@ -618,6 +647,30 @@ extern (C) byte[] _d_arrayappendcTX(const TypeInfo ti, ref byte[] px, size_t n) 
 	(cast(size_t *)(&px))[0] = newLength;
 	(cast(void **)(&px))[1] = ns.ptr;
 	return px;
+}
+
+extern(C) void[] _d_arraycatnTX(const TypeInfo ti, scope byte[][] arrs) @trusted
+{
+	auto elemSize = ti.next.size;
+	size_t length;
+	foreach (b; arrs)
+        length += b.length;
+	if(!length)
+		return null;
+	ubyte* ptr = cast(ubyte*)malloc(length * elemSize);
+
+	//Copy data
+	{
+		ubyte* nPtr = ptr;
+		foreach(b; arrs)
+		{
+			byte* bPtr = b.ptr;
+			size_t copySize = b.length*elemSize;
+			nPtr[0..copySize] = cast(ubyte[])bPtr[0..copySize];
+			nPtr+= copySize;
+		}
+	}
+	return cast(void[])ptr[0..length];
 }
 
 alias AliasSeq(T...) = T;
