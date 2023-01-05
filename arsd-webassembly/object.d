@@ -3,6 +3,11 @@ module object;
 
 static import arsd.webassembly;
 
+version(CarelessAlocation)
+{
+	version = inline_concat;
+}
+
 alias string = immutable(char)[];
 alias wstring = immutable(wchar)[];
 alias dstring = immutable(dchar)[];
@@ -318,10 +323,9 @@ extern(C) void _d_assert(string file, uint line) {
 	arsd.webassembly.abort();
 }
 
-extern(C) void _d_assert_msg(string msg, string f, uint l)
+extern(C) void _d_assert_msg(string msg, string file, uint line)
 {
-	_d_assert(f, l);
-	// arsd.webassembly.eval(q{ console.error("Assert failure: " + $0 + ":" + $1); /*, "[" + $2 + ".." + $3 + "] <> " + $4);*/ }, file, line);//, lwr, upr, length);
+	arsd.webassembly.eval(q{ console.error("Assert failure: " + $0 + ":" + $1 + "(" + $2 + ")"); /*, "[" + $2 + ".." + $3 + "] <> " + $4);*/ }, file, line, msg);//, lwr, upr, length);
 	arsd.webassembly.abort();
 }
 
@@ -356,6 +360,20 @@ extern(C) void* _d_dynamic_cast(Object o, TypeInfo_Class c) {
 	}
 	return res;
 }
+
+/*************************************
+ * Attempts to cast Object o to class c.
+ * Returns o if successful, null if not.
+ */
+extern(C) void* _d_interface_cast(void* p, TypeInfo_Class c)
+{
+    if (!p)
+        return null;
+
+    Interface* pi = **cast(Interface***) p;
+    return _d_dynamic_cast(cast(Object)(p - pi.offset), c);
+}
+
 
 extern(C)
 int _d_isbaseof2(scope TypeInfo_Class oc, scope const TypeInfo_Class c, scope ref size_t offset) @safe
@@ -448,8 +466,8 @@ bool opEquals(const Object lhs, const Object rhs)
 }
 
 class TypeInfo {
-	const(TypeInfo) next() const { return null; }
-	size_t size() const { return 0; }
+	const(TypeInfo) next()nothrow pure inout @nogc  { return null; }
+	size_t size() nothrow pure const @safe @nogc { return 0; }
 
 	bool equals(void* p1, void* p2) { return p1 == p2; }
 
@@ -459,11 +477,11 @@ class TypeInfo {
 	* be returned. For static arrays, this returns the default initializer for
 	* a single element of the array, use `tsize` to get the correct size.
 	*/
-    // LOL ldc gives "null function or argument mismatch" if this is abstract on webasm now.
-    const(void)[] initializer() nothrow pure const @trusted @nogc
+    const(void)[] initializer() const @trusted nothrow pure
 	{
 		return (cast(const(void)*) null)[0 .. typeof(null).sizeof];
 	}
+	@property size_t talign() nothrow pure const { return size; }
 }
 
 class TypeInfo_Class : TypeInfo
@@ -528,6 +546,10 @@ class TypeInfo_Array : TypeInfo {
         }
         return true;
     }
+	override @property size_t talign() nothrow pure const
+    {
+        return (void[]).alignof;
+    }
 	override const(void)[] initializer() const @trusted { return (cast(void *)null)[0 ..  (void[]).sizeof]; }
 }
 
@@ -549,6 +571,10 @@ class TypeInfo_StaticArray : TypeInfo {
 		}
 		return true;
 	}
+	override @property size_t talign() nothrow pure const
+    {
+        return value.talign;
+    }
 
 }
 
@@ -560,6 +586,7 @@ class TypeInfo_Enum : TypeInfo {
     override size_t size() const { return base.size; }
     override const(TypeInfo) next() const { return base.next; }
     override bool equals(void* p1, void* p2) { return base.equals(p1, p2); }
+	override @property size_t talign() const { return base.talign; }
 }
 
 extern (C) void[] _d_newarrayU(const scope TypeInfo ti, size_t length)
@@ -575,6 +602,39 @@ extern(C) void[] _d_newarrayT(const TypeInfo ti, size_t length)
 	return arr;
 }
 
+extern(C) void[] _d_newarrayiT(const TypeInfo ti, size_t length)
+{
+	auto result = _d_newarrayU(ti, length);
+	auto tinext = ti.next;
+	auto size = tinext.size;
+	auto init = tinext.initializer();
+	switch (init.length)
+	{
+		foreach (T; AliasSeq!(ubyte, ushort, uint, ulong))
+		{
+		case T.sizeof:
+			if (tinext.talign % T.alignof == 0)
+			{
+				import std.stdio;
+				writeln("Default", size, length, T.sizeof);
+				(cast(T*)result.ptr)[0 .. size * length / T.sizeof] = *cast(T*)init.ptr;
+				return result;
+			}
+			goto default;
+		}
+
+		default:
+		{
+			immutable sz = init.length;
+			for (size_t u = 0; u < size * length; u += sz)
+			{
+				memcpy(result.ptr + u, init.ptr, sz);
+			}
+			return result;
+		}
+	}
+	return result;
+}
 
 
 AllocatedBlock* getAllocatedBlock(void* ptr) {
@@ -650,6 +710,8 @@ extern (C) byte[] _d_arrayappendcTX(const TypeInfo ti, ref byte[] px, size_t n) 
 	return px;
 }
 
+
+version(inline_concat)
 extern(C) void[] _d_arraycatnTX(const TypeInfo ti, scope byte[][] arrs) @trusted
 {
 	auto elemSize = ti.next.size;
@@ -674,6 +736,7 @@ extern(C) void[] _d_arraycatnTX(const TypeInfo ti, scope byte[][] arrs) @trusted
 	return cast(void[])ptr[0..length];
 }
 
+
 alias AliasSeq(T...) = T;
 static foreach(type; AliasSeq!(byte, char, dchar, double, float, int, long, short, ubyte, uint, ulong, ushort, void, wchar)) {
 	mixin(q{
@@ -684,6 +747,16 @@ static foreach(type; AliasSeq!(byte, char, dchar, double, float, int, long, shor
 					return false;
 				else
 				return (*(cast(type*) a) == (*(cast(type*) b)));
+			}
+			override const(void)[] initializer() pure nothrow @trusted const
+			{
+				static if(__traits(isZeroInit, type))
+					return (cast(void*)null)[0 .. type.sizeof];
+				else
+				{
+					static immutable type[1] c;
+					return c;
+				}
 			}
 		}
 		class TypeInfo_A}~type.mangleof~q{ : TypeInfo_Array {
@@ -729,6 +802,21 @@ class TypeInfo_Delegate : TypeInfo {
 	TypeInfo next;
 	string deco;
 	override size_t size() const { return size_t.sizeof * 2; }
+	override bool equals(in void* p1, in void* p2) const
+    {
+        auto dg1 = *cast(void delegate()*)p1;
+        auto dg2 = *cast(void delegate()*)p2;
+        return dg1 == dg2;
+    }
+	override const(void)[] initializer() const @trusted
+    {
+        return (cast(void *)null)[0 .. (int delegate()).sizeof];
+    }
+	override @property size_t talign() nothrow pure const
+    {
+        alias dg = int delegate();
+        return dg.alignof;
+    }
 }
 
 
@@ -763,7 +851,8 @@ class TypeInfo_Const : TypeInfo {
 	TypeInfo base;
 	override size_t size() const { return base.size; }
 	override const(TypeInfo) next() const { return base.next; }
-
+	override const(void)[] initializer() nothrow pure const{return base.initializer();}
+    override @property size_t talign() nothrow pure const { return base.talign; }
 	override bool equals(void* p1, void* p2) { return base.equals(p1, p2); 	}
 }
 /+
@@ -820,6 +909,12 @@ class TypeInfo_Struct : TypeInfo {
             // BUG: relies on the GC not moving objects
             return memcmp(p1, p2, m_init.length) == 0;
     }
+	override @property size_t talign() nothrow pure const { return align_; }
+
+	override const(void)[] initializer() nothrow pure const @safe
+	{
+		return m_init;
+	}
 
 }
 
