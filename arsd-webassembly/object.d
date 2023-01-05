@@ -459,6 +459,7 @@ class TypeInfo {
 	* be returned. For static arrays, this returns the default initializer for
 	* a single element of the array, use `tsize` to get the correct size.
 	*/
+    // LOL ldc gives "null function or argument mismatch" if this is abstract on webasm now.
     const(void)[] initializer() nothrow pure const @trusted @nogc
 	{
 		return (cast(const(void)*) null)[0 .. typeof(null).sizeof];

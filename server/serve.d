@@ -4,6 +4,10 @@ import std.file;
 import std.string;
 import std.process;
 
+// -Wl,--export=__heap_base
+
+// https://github.com/skoppe/wasm-sourcemaps
+
 void handler(Cgi cgi) {
 
 	if(cgi.pathInfo == "/webassembly-core.js") {
