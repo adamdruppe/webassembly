@@ -615,8 +615,6 @@ extern(C) void[] _d_newarrayiT(const TypeInfo ti, size_t length)
 		case T.sizeof:
 			if (tinext.talign % T.alignof == 0)
 			{
-				import std.stdio;
-				writeln("Default", size, length, T.sizeof);
 				(cast(T*)result.ptr)[0 .. size * length / T.sizeof] = *cast(T*)init.ptr;
 				return result;
 			}
