@@ -312,7 +312,7 @@ extern(C) void *memcpy(void* dest, const(void)* src, size_t n)
 	return dest;
 }
 
-int memcmp(const(void)* s1, const(void*) s2, size_t n) pure @nogc nothrow @trusted {
+extern(C) int memcmp(const(void)* s1, const(void*) s2, size_t n) pure @nogc nothrow @trusted {
 	auto b = cast(ubyte*) s1;
 	auto b2 = cast(ubyte*) s2;
 
@@ -866,7 +866,7 @@ class TypeInfo_StaticArray : TypeInfo {
 }
 
 import core.arsd.aa;
-
+alias AARange = core.arsd.aa.Range;
 extern (C)
 {
     // from druntime/src/rt/aaA.d
@@ -890,7 +890,6 @@ extern (C)
     // alias _dg2_t = extern(D) int delegate(void*, void*);
     // int _aaApply2(AA aa, size_t keysize, _dg2_t dg);
 
-    private struct AARange { AA impl; size_t idx; }
     AARange _aaRange(AA aa);
     bool _aaRangeEmpty(AARange r);
     void* _aaRangeFrontKey(AARange r);
@@ -907,6 +906,131 @@ extern (C)
         copiler allowed to create AA literal with keys, which have impure unsafe toHash methods.
     */
     void* _d_assocarrayliteralTX(const TypeInfo_AssociativeArray ti, void[] keys, void[] values);
+}
+
+Key[] keys(T : Value[Key], Value, Key)(T aa) @property
+{
+    // ensure we are dealing with a genuine AA.
+    static if (is(const(Value[Key]) == const(T)))
+        alias realAA = aa;
+    else
+        const(Value[Key]) realAA = aa;
+    auto res = () @trusted {
+        auto a = cast(void[])_aaKeys(*cast(inout(AA)*)&realAA, Key.sizeof, typeid(Key[]));
+        return *cast(Key[]*)&a;
+    }();
+    static if (__traits(hasPostblit, Key))
+        _doPostblit(res);
+    return res;
+}
+
+/** ditto */
+Key[] keys(T : Value[Key], Value, Key)(T *aa) @property
+{
+    return (*aa).keys;
+}
+
+/***********************************
+ * Returns a newly allocated dynamic array containing a copy of the values from
+ * the associative array.
+ * Params:
+ *      aa =     The associative array.
+ * Returns:
+ *      A dynamic array containing a copy of the values.
+ */
+Value[] values(T : Value[Key], Value, Key)(T aa) @property
+{
+    // ensure we are dealing with a genuine AA.
+    static if (is(const(Value[Key]) == const(T)))
+        alias realAA = aa;
+    else
+        const(Value[Key]) realAA = aa;
+    auto res = () @trusted {
+        auto a = cast(void[])_aaValues(*cast(inout(AA)*)&realAA, Key.sizeof, Value.sizeof, typeid(Value[]));
+        return *cast(Value[]*)&a;
+    }();
+    static if (__traits(hasPostblit, Value))
+        _doPostblit(res);
+    return res;
+}
+
+/** ditto */
+Value[] values(T : Value[Key], Value, Key)(T *aa) @property
+{
+    return (*aa).values;
+}
+inout(V) get(K, V)(inout(V[K]) aa, K key, lazy inout(V) defaultValue)
+{
+    auto p = key in aa;
+    return p ? *p : defaultValue;
+}
+
+/** ditto */
+inout(V) get(K, V)(inout(V[K])* aa, K key, lazy inout(V) defaultValue)
+{
+    return (*aa).get(key, defaultValue);
+}
+// Tests whether T can be @safe-ly copied. Use a union to exclude destructor from the test.
+private enum bool isSafeCopyable(T) = is(typeof(() @safe { union U { T x; } T *x; auto u = U(*x); }));
+
+/***********************************
+ * Looks up key; if it exists applies the update callable else evaluates the
+ * create callable and adds it to the associative array
+ * Params:
+ *      aa =     The associative array.
+ *      key =    The key.
+ *      create = The callable to apply on create.
+ *      update = The callable to apply on update.
+ */
+void update(K, V, C, U)(ref V[K] aa, K key, scope C create, scope U update)
+if (is(typeof(create()) : V) && (is(typeof(update(aa[K.init])) : V) || is(typeof(update(aa[K.init])) == void)))
+{
+    bool found;
+    // if key is @safe-ly copyable, `update` may infer @safe
+    static if (isSafeCopyable!K)
+    {
+        auto p = () @trusted
+        {
+            return cast(V*) _aaGetX(cast(AA*) &aa, typeid(V[K]), V.sizeof, &key, found);
+        } ();
+    }
+    else
+    {
+        auto p = cast(V*) _aaGetX(cast(AA*) &aa, typeid(V[K]), V.sizeof, &key, found);
+    }
+    if (!found)
+        *p = create();
+    else
+    {
+        static if (is(typeof(update(*p)) == void))
+            update(*p);
+        else
+            *p = update(*p);
+    }
+}
+
+ref V require(K, V)(ref V[K] aa, K key, lazy V value = V.init)
+{
+    bool found;
+    // if key is @safe-ly copyable, `require` can infer @safe
+    static if (isSafeCopyable!K)
+    {
+        auto p = () @trusted
+        {
+            return cast(V*) _aaGetX(cast(AA*) &aa, typeid(V[K]), V.sizeof, &key, found);
+        } ();
+    }
+    else
+    {
+        auto p = cast(V*) _aaGetX(cast(AA*) &aa, typeid(V[K]), V.sizeof, &key, found);
+    }
+    if (found)
+        return *p;
+    else
+    {
+        *p = value; // Not `return (*p = value)` since if `=` is overloaded
+        return *p;  // this might not return a ref to the left-hand side.
+    }
 }
 
 
@@ -1045,6 +1169,37 @@ extern(C) void[] _d_newarrayiT(const TypeInfo ti, size_t length)
 	}
 	return result;
 }
+
+extern (C) void* _d_newitemU(scope const TypeInfo _ti)
+{
+	import core.arsd.objectutils;
+    auto ti =  cast()_ti;
+    immutable tiSize = structTypeInfoSize(ti);
+    immutable itemSize = ti.size;
+    immutable size = itemSize + tiSize;
+    auto p = malloc(size);
+
+    return p.ptr;
+}
+
+/// ditto
+extern (C) void* _d_newitemT(in TypeInfo _ti)
+{
+    auto p = _d_newitemU(_ti);
+    memset(p, 0, _ti.size);
+    return p;
+}
+
+/// Same as above, for item with non-zero initializer.
+extern (C) void* _d_newitemiT(in TypeInfo _ti)
+{
+    auto p = _d_newitemU(_ti);
+    auto init = _ti.initializer();
+    assert(init.length <= _ti.size);
+    memcpy(p, init.ptr, init.length);
+    return p;
+}
+
 
 
 AllocatedBlock* getAllocatedBlock(void* ptr) {
