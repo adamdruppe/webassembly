@@ -11,6 +11,27 @@ size_t structTypeInfoSize(const TypeInfo ti) pure nothrow @nogc
     }
     return 0;
 }
+// strip const/immutable/shared/inout from type info
+inout(TypeInfo) unqualify(return scope inout(TypeInfo) cti) pure nothrow @nogc
+{
+    TypeInfo ti = cast() cti;
+    while (ti)
+    {
+        // avoid dynamic type casts
+        auto tti = typeid(ti);
+        if (tti is typeid(TypeInfo_Const))
+            ti = (cast(TypeInfo_Const)cast(void*)ti).base;
+        else if (tti is typeid(TypeInfo_Invariant))
+            ti = (cast(TypeInfo_Invariant)cast(void*)ti).base;
+        else if (tti is typeid(TypeInfo_Shared))
+            ti = (cast(TypeInfo_Shared)cast(void*)ti).base;
+        else if (tti is typeid(TypeInfo_Inout))
+            ti = (cast(TypeInfo_Inout)cast(void*)ti).base;
+        else
+            break;
+    }
+    return ti;
+}
 
 bool hasPostblit(in TypeInfo ti) nothrow pure
 {

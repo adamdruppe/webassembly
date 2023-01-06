@@ -12,6 +12,7 @@ module core.arsd.aa;
 extern (C) immutable int _aaVersion = 1;
 
 import core.internal.util.math : min, max;
+import core.internal.hash;
 
 // grow threshold
 private enum GROW_NUM = 4;
@@ -203,7 +204,10 @@ private void* allocEntry(scope const Impl* aa, scope const void* pkey)
 {
     immutable akeysz = aa.valoff;
     void* res = void;
-    res = malloc(akeysz + aa.valsz).ptr;
+    if(aa.entryTI)
+        res = _d_newitemU(aa.entryTI);
+    else
+        res = malloc(akeysz + aa.valsz).ptr;
 
     memcpy(res, pkey, aa.keysz); // copy key
     memset(res + akeysz, 0, aa.valsz); // zero value
@@ -235,10 +239,10 @@ private bool hasDtor(const TypeInfo ti) pure nothrow
 // build type info for Entry with additional key and value fields
 TypeInfo_Struct fakeEntryTI(ref Impl aa, const TypeInfo keyti, const TypeInfo valti)
 {
-
+    import core.arsd.objectutils;
     //Same as unqualify
-    auto kti = cast()keyti;
-    auto vti = cast()valti;
+    auto kti = unqualify(keyti);
+    auto vti = unqualify(valti);
 
     
     bool entryHasDtor = hasDtor(kti) || hasDtor(vti);
@@ -379,6 +383,7 @@ extern (C) void* _aaGetY(scope ubyte** paa, const TypeInfo_AssociativeArray ti,
 extern (C) void* _aaGetX(scope ubyte** paa, const TypeInfo_AssociativeArray ti,
     const size_t valsz, scope const void* pkey, out bool found)
 {
+    
     // lazily alloc implementation
     AA aa = *cast(AA*)paa;
     if (aa is null)
@@ -416,8 +421,7 @@ extern (C) void* _aaGetX(scope ubyte** paa, const TypeInfo_AssociativeArray ti,
     if (aa.flags & Impl.Flags.keyHasPostblit)
     {
         import core.arsd.objectutils;
-        //Same as unqualify
-        __doPostblit(p.entry, aa.keysz, cast()ti.key);
+        __doPostblit(p.entry, aa.keysz, unqualify(ti.key));
     }
     // return pointer to value
     return p.entry + aa.valoff;
@@ -453,8 +457,7 @@ extern (C) inout(void)* _aaGetRvalueX(inout ubyte** aa, scope const TypeInfo key
 extern (C) inout(void)* _aaInX(inout ubyte** _aa, scope const TypeInfo keyti, scope const void* pkey)
 {
     import std.stdio;
-    AA aa = *cast(AA*)_aa;
-    writeln(aa.empty);
+    AA aa = cast(AA)_aa;
     if (aa.empty)
         return null;
 
@@ -465,11 +468,11 @@ extern (C) inout(void)* _aaInX(inout ubyte** _aa, scope const TypeInfo keyti, sc
 }
 
 /// Delete entry scope const AA, return true if it was present
-extern (C) bool _aaDelX(AA aa, scope const TypeInfo keyti, scope const void* pkey)
+extern (C) bool _aaDelX(ubyte* _aa, scope const TypeInfo keyti, scope const void* pkey)
 {
+    AA aa = cast(AA)_aa;
     if (aa.empty)
         return false;
-
     immutable hash = calcHash(pkey, keyti);
     if (auto p = aa.findSlotLookup(hash, pkey, keyti))
     {
@@ -557,8 +560,9 @@ extern (D) alias dg_t = int delegate(void*);
 extern (D) alias dg2_t = int delegate(void*, void*);
 
 /// foreach opApply over all values
-extern (C) int _aaApply(AA aa, const size_t keysz, dg_t dg)
+extern (C) int _aaApply(ubyte* _aa, const size_t keysz, dg_t dg)
 {
+    AA aa = cast(AA)_aa;
     if (aa.empty)
         return 0;
 
@@ -574,8 +578,9 @@ extern (C) int _aaApply(AA aa, const size_t keysz, dg_t dg)
 }
 
 /// foreach opApply over all key/value pairs
-extern (C) int _aaApply2(AA aa, const size_t keysz, dg2_t dg)
+extern (C) int _aaApply2(ubyte* _aa, const size_t keysz, dg2_t dg)
 {
+    AA aa = cast(AA)_aa;
     if (aa.empty)
         return 0;
 
@@ -620,7 +625,6 @@ extern (C) ubyte* _d_assocarrayliteralTX(const TypeInfo_AssociativeArray ti, voi
     foreach (_; 0 .. length)
     {
         immutable hash = calcHash(pkey, ti.key);
-
         auto p = aa.findSlotLookup(hash, pkey, ti.key);
         if (p is null)
         {
@@ -660,8 +664,10 @@ extern (C) int _aaEqual(scope const TypeInfo tiRaw, scope const ubyte* _aa1, sco
 
     if (!len) // both empty
         return true;
+    
+    import core.arsd.objectutils;
 
-    auto uti = cast()tiRaw; //unqualify
+    auto uti = unqualify(tiRaw); //unqualify
     auto ti = *cast(TypeInfo_AssociativeArray*)&uti;
     // compare the entries
     immutable off = aa1.valoff;
@@ -686,7 +692,8 @@ extern (C) size_t _aaGetHash(scope const ubyte** _paa, scope const TypeInfo tiRa
         return 0;
 
 
-    auto uti = cast()tiRaw;
+    import core.arsd.objectutils;
+    auto uti = unqualify(tiRaw);
     auto ti = *cast(TypeInfo_AssociativeArray*)&uti;
     immutable off = aa.valoff;
     auto keyHash = &ti.key.getHash;

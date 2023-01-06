@@ -1096,6 +1096,8 @@ class TypeInfo_AssociativeArray : TypeInfo
     }
 
     override @property inout(TypeInfo) next() nothrow pure inout { return value; }
+    override @property uint flags() nothrow pure const { return 1; }
+
 
     TypeInfo value;
     TypeInfo key;
@@ -1306,13 +1308,24 @@ alias AliasSeq(T...) = T;
 static foreach(type; AliasSeq!(byte, char, dchar, double, float, int, long, short, ubyte, uint, ulong, ushort, void, wchar)) {
 	mixin(q{
 		class TypeInfo_}~type.mangleof~q{ : TypeInfo {
+            override string toString() const pure nothrow @safe { return type.stringof; }
 			override size_t size() const { return type.sizeof; }
+            override @property size_t talign() const pure nothrow
+            {
+                return type.alignof;
+            }
+
 			override bool equals(in void* a, in void* b) const {
 				static if(is(type == void))
 					return false;
 				else
 				return (*(cast(type*) a) == (*(cast(type*) b)));
 			}
+            static if(!is(type == void))
+            override size_t getHash(scope const void* p) @trusted const nothrow
+            {
+                return hashOf(*cast(const type *)p);
+            }
 			override const(void)[] initializer() pure nothrow @trusted const
 			{
 				static if(__traits(isZeroInit, type))
@@ -1325,7 +1338,13 @@ static foreach(type; AliasSeq!(byte, char, dchar, double, float, int, long, shor
 			}
 		}
 		class TypeInfo_A}~type.mangleof~q{ : TypeInfo_Array {
+            override string toString() const { return (type[]).stringof; }
 			override const(TypeInfo) next() const { return typeid(type); }
+            override size_t getHash(scope const void* p) @trusted const nothrow
+            {
+                return hashOf(*cast(const type[]*) p);
+            }
+
 			override bool equals(in void* av, in void* bv) const {
 				type[] a = *(cast(type[]*) av);
 				type[] b = *(cast(type[]*) bv);
@@ -1448,10 +1467,13 @@ class TypeInfo_Inout : TypeInfo {
 class TypeInfo_Struct : TypeInfo {
 	string name;
 	void[] m_init;
-	void* xtohash;
+    @safe pure nothrow
+    {
+    size_t   function(in void*)           xtoHash;
 	bool     function(in void*, in void*) xopEquals;
 	int      function(in void*, in void*) xopCmp;
-	void* xtostring;
+    string   function(in void*)           xtoString;
+    }
 	uint m_flags;
 	union {
 		void function(void*) xdtor;
@@ -1468,6 +1490,31 @@ class TypeInfo_Struct : TypeInfo {
 	}
 	override size_t size() const { return m_init.length; }
 	override @property uint flags() nothrow pure const @safe @nogc { return m_flags; }
+
+    override size_t toHash() const
+    {
+        return hashOf(this.name);
+    }
+    override bool opEquals(Object o)
+    {
+        if (this is o)
+            return true;
+        auto s = cast(const TypeInfo_Struct)o;
+        return s && this.name == s.name;
+    }
+    override size_t getHash(scope const void* p) @trusted pure nothrow const
+    {
+        assert(p);
+        if (xtoHash)
+        {
+            return (*xtoHash)(p);
+        }
+        else
+        {
+            return hashOf(p[0 .. initializer().length]);
+        }
+    }
+
 
     override bool equals(in void* p1, in void* p2) @trusted const
     {
@@ -1579,15 +1626,4 @@ immutable(T)[] idup(T)(scope const(T)[] array) pure nothrow @trusted
 	return result;
 }
 
-
-size_t hashOf(T)(auto ref T arg, size_t seed)
-{
-	static import core.internal.hash;
-	return core.internal.hash.hashOf(arg, seed);
-}
-/// ditto
-size_t hashOf(T)(auto ref T arg)
-{
-	static import core.internal.hash;
-	return core.internal.hash.hashOf(arg);
-}
+import core.internal.hash;
