@@ -1264,7 +1264,7 @@ template _d_arraysetlengthTImpl(Tarr : T[], T) {
 		if(newlength <= arr.length) {
 			arr = arr[0 ..newlength];
 		} else {
-			auto ptr = cast(T*) realloc(cast(ubyte*) arr.ptr, newlength * T.sizeof);
+			auto ptr = cast(T*) realloc(cast(ubyte[])arr, newlength * T.sizeof);
 			arr = ptr[0 .. newlength];
 			if(orig !is null) {
 				arr[0 .. orig.length] = orig[];

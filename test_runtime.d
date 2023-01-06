@@ -109,4 +109,9 @@ void main()
 		writeln(ch);
 	}
 	writeln(decInput);
+	int[] arrCastTest = [int.max];
+
+	foreach(v; cast(ubyte[])arrCastTest)
+		writeln(v);
+
 }
