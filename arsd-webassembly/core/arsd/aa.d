@@ -11,8 +11,10 @@ module core.arsd.aa;
 /// AA version for debuggers, bump whenever changing the layout
 extern (C) immutable int _aaVersion = 1;
 
-import core.internal.util.math : min, max;
 import core.internal.hash;
+
+uint min(uint a, uint b) { return a < b ? a : b; }
+uint max(uint a, uint b) { return a > b ? a : b; }
 
 // grow threshold
 private enum GROW_NUM = 4;
