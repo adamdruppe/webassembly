@@ -76,6 +76,18 @@ void main()
 	string strTest = "test"[0..$];
 	assert(strTest == "test");
 
+	
+	Tester* structObj = new Tester(50_000, "Inline Allocation");
+	writeln(structObj is null, structObj.a, structObj.b);
+
+	int[string] hello = ["hello": 500];
+	assert(("hello" in hello) !is null, "No key hello yet...");
+	assert(hello["hello"] == 500, "Not 500");
+	hello["hello"] = 1200;
+	assert(hello["hello"] == 1200, "Reassign didn't work");
+	hello["h2o"] = 250;
+	assert(hello["h2o"] == 250, "New member");
+
 	foreach(dchar ch; "こんいちは")
 		writeln(ch);
 
