@@ -95,7 +95,7 @@ static assert(AllocatedBlock.sizeof % 16 == 0);
 void free(ubyte* ptr) {
 	auto block = (cast(AllocatedBlock*) ptr) - 1;
 	if(!block.checkChecksum())
-		arsd.webassembly.abort();
+        assert(false, "Could not check block on free");
 
 	block.used = 0;
 	block.flags = 0;
@@ -113,7 +113,7 @@ ubyte[] realloc(ubyte* ptr, size_t newSize) {
 
 	auto block = (cast(AllocatedBlock*) ptr) - 1;
 	if(!block.checkChecksum())
-		arsd.webassembly.abort();
+		assert(false, "Could not check block while realloc");
 
 	// block.populateChecksum();
 	if(newSize <= block.blockSize) {
@@ -1323,6 +1323,48 @@ extern (C) byte[] _d_arraycatT(const TypeInfo ti, byte[] x, byte[] y)
     // do postblit processing
     __doPostblit(p.ptr, xlen + ylen, ti.next);
     return p[0 .. x.length + y.length];
+}
+
+extern (C) void[] _d_arrayappendcd(ref byte[] x, dchar c)
+{
+    // c could encode into from 1 to 4 characters
+    char[4] buf = void;
+    byte[] appendthis; // passed to appendT
+    if (c <= 0x7F)
+    {
+        buf.ptr[0] = cast(char)c;
+        appendthis = (cast(byte *)buf.ptr)[0..1];
+    }
+    else if (c <= 0x7FF)
+    {
+        buf.ptr[0] = cast(char)(0xC0 | (c >> 6));
+        buf.ptr[1] = cast(char)(0x80 | (c & 0x3F));
+        appendthis = (cast(byte *)buf.ptr)[0..2];
+    }
+    else if (c <= 0xFFFF)
+    {
+        buf.ptr[0] = cast(char)(0xE0 | (c >> 12));
+        buf.ptr[1] = cast(char)(0x80 | ((c >> 6) & 0x3F));
+        buf.ptr[2] = cast(char)(0x80 | (c & 0x3F));
+        appendthis = (cast(byte *)buf.ptr)[0..3];
+    }
+    else if (c <= 0x10FFFF)
+    {
+        buf.ptr[0] = cast(char)(0xF0 | (c >> 18));
+        buf.ptr[1] = cast(char)(0x80 | ((c >> 12) & 0x3F));
+        buf.ptr[2] = cast(char)(0x80 | ((c >> 6) & 0x3F));
+        buf.ptr[3] = cast(char)(0x80 | (c & 0x3F));
+        appendthis = (cast(byte *)buf.ptr)[0..4];
+    }
+    else
+        assert(false, "Could not append dchar");      // invalid utf character - should we throw an exception instead?
+
+    //
+    // TODO: This always assumes the array type is shared, because we do not
+    // get a typeinfo from the compiler.  Assuming shared is the safest option.
+    // Once the compiler is fixed, the proper typeinfo should be forwarded.
+    //
+    return _d_arrayappendT(typeid(shared char[]), x, appendthis);
 }
 
 
