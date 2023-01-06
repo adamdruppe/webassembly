@@ -107,9 +107,9 @@ void free(ubyte* ptr) {
 	}
 }
 
-ubyte[] realloc(ubyte* ptr, size_t newSize) {
+ubyte[] realloc(ubyte* ptr, size_t newSize, string file = __FILE__, size_t line = __LINE__) {
 	if(ptr is null)
-		return malloc(newSize);
+		return malloc(newSize, file, line);
 
 	auto block = (cast(AllocatedBlock*) ptr) - 1;
 	if(!block.checkChecksum())
@@ -145,6 +145,25 @@ ubyte[] realloc(ubyte* ptr, size_t newSize) {
 
 		return newThing;
 	}
+}
+
+/**
+*  If the ptr isn't owned by the runtime, it will completely malloc the data (instead of realloc)
+*   and copy its old content.
+*/
+ubyte[] realloc(ubyte[] ptr, size_t newSize, string file = __FILE__, size_t line = __LINE__)
+{
+    if(ptr is null)
+        return malloc(newSize, file, line);
+    auto block = (cast(AllocatedBlock*) ptr) - 1;
+	if(!block.checkChecksum())
+    {
+        auto ret = malloc(newSize, file, line);
+        ret[0..ptr.length] = ptr[]; //Don't clear ptr memory as it can't be clear.
+        return ret;
+    }
+    else return realloc(ptr.ptr, newSize, file, line);
+
 }
 
 private bool growMemoryIfNeeded(size_t sz) {
@@ -1265,7 +1284,7 @@ extern (C) byte[] _d_arrayappendcTX(const TypeInfo ti, ref byte[] px, size_t n) 
 	if(px.ptr is null)
 		ptr = malloc(newSize).ptr;
 	else // FIXME: anti-stomping by checking length == used
-		ptr = realloc(cast(ubyte*) px.ptr, newSize).ptr;
+		ptr = realloc(cast(ubyte[])px, newSize).ptr;
 	auto ns = ptr[0 .. newSize];
 	auto op = px.ptr;
 	auto ol = px.length * elemSize;

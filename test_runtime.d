@@ -1,4 +1,4 @@
-// ldc2 -i=. -i=std --d-version=CarelessAllocation -Iarsd-webassembly/ -L-allow-undefined -ofserver/omg.wasm -mtriple=wasm32-unknown-unknown-wasm runtime_test arsd-webassembly/object.d
+// ldc2 -i=. --d-version=CarelessAlocation -i=std -Iarsd-webassembly/ -L-allow-undefined -ofserver/omg.wasm -mtriple=wasm32-unknown-unknown-wasm arsd-webassembly/core/arsd/aa arsd-webassembly/core/arsd/objectutils arsd-webassembly/core/internal/utf arsd-webassembly/core/arsd/utf_decoding hello arsd-webassembly/object.d
 
 import arsd.webassembly;
 import std.stdio;
@@ -88,8 +88,25 @@ void main()
 	hello["h2o"] = 250;
 	assert(hello["h2o"] == 250, "New member");
 
+
+	int[] appendTest;
+	appendTest~= 50;
+	appendTest~= 500;
+	appendTest~= 5000;
+	foreach(v; appendTest)
+		writeln(v);
+	string strConcatTest;
+	strConcatTest~= "Hello";
+	strConcatTest~= "World";
+	writeln(strConcatTest);
+	int[] intConcatTest = cast(int[2])[1, 2];
+	intConcatTest~= 50;
+	string decInput = "a";
+	decInput~= "こんいちは";
 	foreach(dchar ch; "こんいちは")
+	{
+		decInput~= ch;
 		writeln(ch);
-
+	}
+	writeln(decInput);
 }
-
