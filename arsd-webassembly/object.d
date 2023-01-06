@@ -3,6 +3,11 @@ module object;
 
 static import arsd.webassembly;
 
+version(CarelessAlocation)
+{
+	version = inline_concat;
+}
+
 alias string = immutable(char)[];
 alias wstring = immutable(wchar)[];
 alias dstring = immutable(dchar)[];
@@ -90,7 +95,7 @@ static assert(AllocatedBlock.sizeof % 16 == 0);
 void free(ubyte* ptr) {
 	auto block = (cast(AllocatedBlock*) ptr) - 1;
 	if(!block.checkChecksum())
-		arsd.webassembly.abort();
+        assert(false, "Could not check block on free");
 
 	block.used = 0;
 	block.flags = 0;
@@ -102,13 +107,13 @@ void free(ubyte* ptr) {
 	}
 }
 
-ubyte[] realloc(ubyte* ptr, size_t newSize) {
+ubyte[] realloc(ubyte* ptr, size_t newSize, string file = __FILE__, size_t line = __LINE__) {
 	if(ptr is null)
-		return malloc(newSize);
+		return malloc(newSize, file, line);
 
 	auto block = (cast(AllocatedBlock*) ptr) - 1;
 	if(!block.checkChecksum())
-		arsd.webassembly.abort();
+		assert(false, "Could not check block while realloc");
 
 	// block.populateChecksum();
 	if(newSize <= block.blockSize) {
@@ -140,6 +145,25 @@ ubyte[] realloc(ubyte* ptr, size_t newSize) {
 
 		return newThing;
 	}
+}
+
+/**
+*  If the ptr isn't owned by the runtime, it will completely malloc the data (instead of realloc)
+*   and copy its old content.
+*/
+ubyte[] realloc(ubyte[] ptr, size_t newSize, string file = __FILE__, size_t line = __LINE__)
+{
+    if(ptr is null)
+        return malloc(newSize, file, line);
+    auto block = (cast(AllocatedBlock*) ptr) - 1;
+	if(!block.checkChecksum())
+    {
+        auto ret = malloc(newSize, file, line);
+        ret[0..ptr.length] = ptr[]; //Don't clear ptr memory as it can't be clear.
+        return ret;
+    }
+    else return realloc(ptr.ptr, newSize, file, line);
+
 }
 
 private bool growMemoryIfNeeded(size_t sz) {
@@ -199,6 +223,14 @@ ubyte[] malloc(size_t sz, string file = __FILE__, size_t line = __LINE__) {
 	assert(cast(size_t) ret % 8 == 0);
 
 	return ret[0 .. sz];
+}
+
+
+ubyte[] calloc(size_t count, size_t size, string file = __FILE__, size_t line = __LINE__) 
+{
+	auto ret = malloc(count*size,file,line);
+	ret[0..$] = 0;
+	return ret;
 }
 
 void reserve(T)(ref T[] arr, size_t length) {
@@ -299,7 +331,7 @@ extern(C) void *memcpy(void* dest, const(void)* src, size_t n)
 	return dest;
 }
 
-int memcmp(const(void)* s1, const(void*) s2, size_t n) {
+extern(C) int memcmp(const(void)* s1, const(void*) s2, size_t n) pure @nogc nothrow @trusted {
 	auto b = cast(ubyte*) s1;
 	auto b2 = cast(ubyte*) s2;
 
@@ -310,6 +342,7 @@ int memcmp(const(void)* s1, const(void*) s2, size_t n) {
 	return 0;
 }
 
+public import core.arsd.utf_decoding;
 
 // }
 
@@ -318,14 +351,16 @@ extern(C) void _d_assert(string file, uint line) {
 	arsd.webassembly.abort();
 }
 
-extern(C) void _d_assert_msg(string msg, string f, uint l)
+extern(C) void _d_assert_msg(string msg, string file, uint line)
 {
-	_d_assert(f, l);
-	// arsd.webassembly.eval(q{ console.error("Assert failure: " + $0 + ":" + $1); /*, "[" + $2 + ".." + $3 + "] <> " + $4);*/ }, file, line);//, lwr, upr, length);
+	arsd.webassembly.eval(q{ console.error("Assert failure: " + $0 + ":" + $1 + "(" + $2 + ")"); /*, "[" + $2 + ".." + $3 + "] <> " + $4);*/ }, file, line, msg);//, lwr, upr, length);
 	arsd.webassembly.abort();
 }
 
-void __switch_error(string file, size_t line) @nogc nothrow pure @safe {}
+void __switch_error(string file, size_t line)
+{
+	_d_assert_msg("final switch error",file, line);
+}
 
 bool __equals(T1, T2)(scope const T1[] lhs, scope const T2[] rhs) {
 	if (lhs.length != rhs.length) {
@@ -357,6 +392,20 @@ extern(C) void* _d_dynamic_cast(Object o, TypeInfo_Class c) {
 	return res;
 }
 
+/*************************************
+ * Attempts to cast Object o to class c.
+ * Returns o if successful, null if not.
+ */
+extern(C) void* _d_interface_cast(void* p, TypeInfo_Class c)
+{
+    if (!p)
+        return null;
+
+    Interface* pi = **cast(Interface***) p;
+    return _d_dynamic_cast(cast(Object)(p - pi.offset), c);
+}
+
+
 extern(C)
 int _d_isbaseof2(scope TypeInfo_Class oc, scope const TypeInfo_Class c, scope ref size_t offset) @safe
 
@@ -385,6 +434,243 @@ int _d_isbaseof2(scope TypeInfo_Class oc, scope const TypeInfo_Class c, scope re
 
     return false;
 }
+
+int __cmp(T)(scope const T[] lhs, scope const T[] rhs) @trusted pure @nogc nothrow
+    if (__traits(isScalar, T))
+{
+    // Compute U as the implementation type for T
+    static if (is(T == ubyte) || is(T == void) || is(T == bool))
+        alias U = char;
+    else static if (is(T == wchar))
+        alias U = ushort;
+    else static if (is(T == dchar))
+        alias U = uint;
+    else static if (is(T == ifloat))
+        alias U = float;
+    else static if (is(T == idouble))
+        alias U = double;
+    else static if (is(T == ireal))
+        alias U = real;
+    else
+        alias U = T;
+
+    static if (is(U == char))
+    {
+        int dstrcmp(scope const char[] s1, scope const char[] s2 ) @trusted pure @nogc nothrow
+		{
+			immutable len = s1.length <= s2.length ? s1.length : s2.length;
+			if (__ctfe)
+			{
+				foreach (const u; 0 .. len)
+				{
+					if (s1[u] != s2[u])
+						return s1[u] > s2[u] ? 1 : -1;
+				}
+			}
+			else
+			{
+				const ret = memcmp( s1.ptr, s2.ptr, len );
+				if ( ret )
+					return ret;
+			}
+			return (s1.length > s2.length) - (s1.length < s2.length);
+		}
+        return dstrcmp(cast(char[]) lhs, cast(char[]) rhs);
+    }
+    else static if (!is(U == T))
+    {
+        // Reuse another implementation
+        return __cmp(cast(U[]) lhs, cast(U[]) rhs);
+    }
+    else
+    {
+        version (BigEndian)
+        static if (__traits(isUnsigned, T) ? !is(T == __vector) : is(T : P*, P))
+        {
+            if (!__ctfe)
+            {
+                import core.stdc.string : memcmp;
+                int c = memcmp(lhs.ptr, rhs.ptr, (lhs.length <= rhs.length ? lhs.length : rhs.length) * T.sizeof);
+                if (c)
+                    return c;
+                static if (size_t.sizeof <= uint.sizeof && T.sizeof >= 2)
+                    return cast(int) lhs.length - cast(int) rhs.length;
+                else
+                    return int(lhs.length > rhs.length) - int(lhs.length < rhs.length);
+            }
+        }
+
+        immutable len = lhs.length <= rhs.length ? lhs.length : rhs.length;
+        foreach (const u; 0 .. len)
+        {
+            auto a = lhs.ptr[u], b = rhs.ptr[u];
+            static if (is(T : creal))
+            {
+                // Use rt.cmath2._Ccmp instead ?
+                // Also: if NaN is present, numbers will appear equal.
+                auto r = (a.re > b.re) - (a.re < b.re);
+                if (!r) r = (a.im > b.im) - (a.im < b.im);
+            }
+            else
+            {
+                // This pattern for three-way comparison is better than conditional operators
+                // See e.g. https://godbolt.org/z/3j4vh1
+                const r = (a > b) - (a < b);
+            }
+            if (r) return r;
+        }
+        return (lhs.length > rhs.length) - (lhs.length < rhs.length);
+    }
+}
+
+// This function is called by the compiler when dealing with array
+// comparisons in the semantic analysis phase of CmpExp. The ordering
+// comparison is lowered to a call to this template.
+int __cmp(T1, T2)(T1[] s1, T2[] s2)
+if (!__traits(isScalar, T1) && !__traits(isScalar, T2))
+{
+    import core.internal.traits : Unqual;
+    alias U1 = Unqual!T1;
+    alias U2 = Unqual!T2;
+
+    static if (is(U1 == void) && is(U2 == void))
+        static @trusted ref inout(ubyte) at(inout(void)[] r, size_t i) { return (cast(inout(ubyte)*) r.ptr)[i]; }
+    else
+        static @trusted ref R at(R)(R[] r, size_t i) { return r.ptr[i]; }
+
+    // All unsigned byte-wide types = > dstrcmp
+    immutable len = s1.length <= s2.length ? s1.length : s2.length;
+
+    foreach (const u; 0 .. len)
+    {
+        static if (__traits(compiles, __cmp(at(s1, u), at(s2, u))))
+        {
+            auto c = __cmp(at(s1, u), at(s2, u));
+            if (c != 0)
+                return c;
+        }
+        else static if (__traits(compiles, at(s1, u).opCmp(at(s2, u))))
+        {
+            auto c = at(s1, u).opCmp(at(s2, u));
+            if (c != 0)
+                return c;
+        }
+        else static if (__traits(compiles, at(s1, u) < at(s2, u)))
+        {
+            if (int result = (at(s1, u) > at(s2, u)) - (at(s1, u) < at(s2, u)))
+                return result;
+        }
+        else
+        {
+            // TODO: fix this legacy bad behavior, see
+            // https://issues.dlang.org/show_bug.cgi?id=17244
+            static assert(is(U1 == U2), "Internal error.");
+            import core.stdc.string : memcmp;
+            auto c = (() @trusted => memcmp(&at(s1, u), &at(s2, u), U1.sizeof))();
+            if (c != 0)
+                return c;
+        }
+    }
+    return (s1.length > s2.length) - (s1.length < s2.length);
+}
+
+
+
+/**
+Support for switch statements switching on strings.
+Params:
+    caseLabels = sorted array of strings generated by compiler. Note the
+        strings are sorted by length first, and then lexicographically.
+    condition = string to look up in table
+Returns:
+    index of match in caseLabels, a negative integer if not found
+*/
+int __switch(T, caseLabels...)(/*in*/ const scope T[] condition) pure nothrow @safe @nogc
+{
+    // This closes recursion for other cases.
+    static if (caseLabels.length == 0)
+    {
+        return int.min;
+    }
+    else static if (caseLabels.length == 1)
+    {
+        return __cmp(condition, caseLabels[0]) == 0 ? 0 : int.min;
+    }
+    // To be adjusted after measurements
+    // Compile-time inlined binary search.
+    else static if (caseLabels.length < 7)
+    {
+        int r = void;
+        enum mid = cast(int)caseLabels.length / 2;
+        if (condition.length == caseLabels[mid].length)
+        {
+            r = __cmp(condition, caseLabels[mid]);
+            if (r == 0) return mid;
+        }
+        else
+        {
+            // Equivalent to (but faster than) condition.length > caseLabels[$ / 2].length ? 1 : -1
+            r = ((condition.length > caseLabels[mid].length) << 1) - 1;
+        }
+
+        if (r < 0)
+        {
+            // Search the left side
+            return __switch!(T, caseLabels[0 .. mid])(condition);
+        }
+        else
+        {
+            // Search the right side
+            return __switch!(T, caseLabels[mid + 1 .. $])(condition) + mid + 1;
+        }
+    }
+    else
+    {
+        // Need immutable array to be accessible in pure code, but case labels are
+        // currently coerced to the switch condition type (e.g. const(char)[]).
+        pure @trusted nothrow @nogc asImmutable(scope const(T[])[] items)
+        {
+            assert(__ctfe); // only @safe for CTFE
+            immutable T[][caseLabels.length] result = cast(immutable)(items[]);
+            return result;
+        }
+        static immutable T[][caseLabels.length] cases = asImmutable([caseLabels]);
+
+        // Run-time binary search in a static array of labels.
+        return __switchSearch!T(cases[], condition);
+    }
+}
+
+// binary search in sorted string cases, also see `__switch`.
+private int __switchSearch(T)(/*in*/ const scope T[][] cases, /*in*/ const scope T[] condition) pure nothrow @safe @nogc
+{
+    size_t low = 0;
+    size_t high = cases.length;
+
+    do
+    {
+        auto mid = (low + high) / 2;
+        int r = void;
+        if (condition.length == cases[mid].length)
+        {
+            r = __cmp(condition, cases[mid]);
+            if (r == 0) return cast(int) mid;
+        }
+        else
+        {
+            // Generates better code than "expr ? 1 : -1" on dmd and gdc, same with ldc
+            r = ((condition.length > cases[mid].length) << 1) - 1;
+        }
+
+        if (r > 0) low = mid + 1;
+        else high = mid;
+    }
+    while (low < high);
+
+    // Not found
+    return -1;
+}
+
 
 // for floats
 extern(C) double fmod(double f, double w) {
@@ -447,11 +733,28 @@ bool opEquals(const Object lhs, const Object rhs)
     return opEquals(cast()lhs, cast()rhs);
 }
 
-class TypeInfo {
-	const(TypeInfo) next() const { return null; }
-	size_t size() const { return 0; }
+class TypeInfo 
+{
+	override string toString() const @safe nothrow
+    {
+        return typeid(this).name;
+    }
 
-	bool equals(void* p1, void* p2) { return p1 == p2; }
+	const(TypeInfo) next()nothrow pure inout @nogc  { return null; }
+	size_t size() nothrow pure const @safe @nogc { return 0; }
+
+	bool equals(in void* p1, in void* p2) const { return p1 == p2; }
+
+	override size_t toHash() @trusted const nothrow
+    {
+        return hashOf(this.toString());
+    }
+
+
+	size_t getHash(scope const void* p) @trusted nothrow const
+	{
+		return hashOf(p);
+	}
 
 	/**
 	* Return default initializer.  If the type should be initialized to all
@@ -459,11 +762,18 @@ class TypeInfo {
 	* be returned. For static arrays, this returns the default initializer for
 	* a single element of the array, use `tsize` to get the correct size.
 	*/
-    // LOL ldc gives "null function or argument mismatch" if this is abstract on webasm now.
-    const(void)[] initializer() nothrow pure const @trusted @nogc
+    const(void)[] initializer() const @trusted nothrow pure
 	{
 		return (cast(const(void)*) null)[0 .. typeof(null).sizeof];
 	}
+
+	@property uint flags() nothrow pure const @safe @nogc { return 0; }
+	/// Run the destructor on the object and all its sub-objects
+    void destroy(void* p) const {}
+    /// Run the postblit on the object and all its sub-objects
+    void postblit(void* p) const {}
+
+	@property size_t talign() nothrow pure const { return size; }
 }
 
 class TypeInfo_Class : TypeInfo
@@ -497,11 +807,26 @@ class TypeInfo_Class : TypeInfo
         return m_init;
     }
 }
+
+void destroy(bool initialize = true, T)(ref T obj) if (is(T == struct))
+{
+    import core.internal.destruction : destructRecurse;
+
+    destructRecurse(obj);
+
+    static if (initialize)
+    {
+        import core.internal.lifetime : emplaceInitializer;
+        emplaceInitializer(obj); // emplace T.init
+    }
+}
+
+
 class TypeInfo_Pointer : TypeInfo
 {
     TypeInfo m_next;
 
-    override bool equals(void* p1, void* p2) { return *cast(void**)p1 == *cast(void**)p2; }
+    override bool equals(in void* p1, in void* p2) const { return *cast(void**)p1 == *cast(void**)p2; }
     override @property size_t size() nothrow pure const { return (void*).sizeof; }
 
 	override const(void)[] initializer() const @trusted { return (cast(void *)null)[0 .. (void*).sizeof]; }
@@ -514,7 +839,7 @@ class TypeInfo_Array : TypeInfo {
 	override size_t size() const { return (void[]).sizeof; }
 	override const(TypeInfo) next() const { return value; }
 
-	override bool equals(void* p1, void* p2)
+	override bool equals(in void* p1, in void* p2) const
     {
         void[] a1 = *cast(void[]*)p1;
         void[] a2 = *cast(void[]*)p2;
@@ -528,6 +853,10 @@ class TypeInfo_Array : TypeInfo {
         }
         return true;
     }
+	override @property size_t talign() nothrow pure const
+    {
+        return (void[]).alignof;
+    }
 	override const(void)[] initializer() const @trusted { return (cast(void *)null)[0 ..  (void[]).sizeof]; }
 }
 
@@ -537,7 +866,7 @@ class TypeInfo_StaticArray : TypeInfo {
 	override size_t size() const { return value.size * len; }
 	override const(TypeInfo) next() const { return value; }
 
-	override bool equals(void* p1, void* p2) {
+	override bool equals(in void* p1, in void* p2) const {
 		size_t sz = value.size;
 
 		for (size_t u = 0; u < len; u++)
@@ -549,8 +878,263 @@ class TypeInfo_StaticArray : TypeInfo {
 		}
 		return true;
 	}
+	override @property size_t talign() nothrow pure const
+    {
+        return value.talign;
+    }
 
 }
+
+import core.arsd.aa;
+alias AARange = core.arsd.aa.Range;
+extern (C)
+{
+    // from druntime/src/rt/aaA.d
+	/* The real type is (non-importable) `rt.aaA.Impl*`;
+		* the compiler uses `void*` for its prototypes.
+		*/
+	private alias AA = void*;
+
+    // size_t _aaLen(in AA aa) pure nothrow @nogc;
+    private void* _aaGetY(scope AA* paa, const TypeInfo_AssociativeArray ti, const size_t valsz, const scope void* pkey);
+    private void* _aaGetX(scope AA* paa, const TypeInfo_AssociativeArray ti, const size_t valsz, const scope void* pkey, out bool found) ;
+    // inout(void)* _aaGetRvalueX(inout AA aa, in TypeInfo keyti, in size_t valsz, in void* pkey);
+    inout(void[]) _aaValues(inout AA aa, const size_t keysz, const size_t valsz, const TypeInfo tiValueArray) ;
+    inout(void[]) _aaKeys(inout AA aa, const size_t keysz, const TypeInfo tiKeyArray) ;
+    void* _aaRehash(AA* paa, const scope TypeInfo keyti) ;
+    void _aaClear(AA aa) ;
+
+    // alias _dg_t = extern(D) int delegate(void*);
+    // int _aaApply(AA aa, size_t keysize, _dg_t dg);
+
+    // alias _dg2_t = extern(D) int delegate(void*, void*);
+    // int _aaApply2(AA aa, size_t keysize, _dg2_t dg);
+
+    AARange _aaRange(AA aa);
+    bool _aaRangeEmpty(AARange r);
+    void* _aaRangeFrontKey(AARange r);
+    void* _aaRangeFrontValue(AARange r);
+    void _aaRangePopFront(ref AARange r);
+
+    int _aaEqual(scope const TypeInfo tiRaw, scope const AA aa1, scope const AA aa2);
+    size_t _aaGetHash(scope const AA* aa, scope const TypeInfo tiRaw) nothrow;
+
+    /*
+        _d_assocarrayliteralTX marked as pure, because aaLiteral can be called from pure code.
+        This is a typesystem hole, however this is existing hole.
+        Early compiler didn't check purity of toHash or postblit functions, if key is a UDT thus
+        copiler allowed to create AA literal with keys, which have impure unsafe toHash methods.
+    */
+    void* _d_assocarrayliteralTX(const TypeInfo_AssociativeArray ti, void[] keys, void[] values);
+}
+
+Key[] keys(T : Value[Key], Value, Key)(T aa) @property
+{
+    // ensure we are dealing with a genuine AA.
+    static if (is(const(Value[Key]) == const(T)))
+        alias realAA = aa;
+    else
+        const(Value[Key]) realAA = aa;
+    auto res = () @trusted {
+        auto a = cast(void[])_aaKeys(*cast(inout(AA)*)&realAA, Key.sizeof, typeid(Key[]));
+        return *cast(Key[]*)&a;
+    }();
+    static if (__traits(hasPostblit, Key))
+        _doPostblit(res);
+    return res;
+}
+
+/** ditto */
+Key[] keys(T : Value[Key], Value, Key)(T *aa) @property
+{
+    return (*aa).keys;
+}
+
+/***********************************
+ * Returns a newly allocated dynamic array containing a copy of the values from
+ * the associative array.
+ * Params:
+ *      aa =     The associative array.
+ * Returns:
+ *      A dynamic array containing a copy of the values.
+ */
+Value[] values(T : Value[Key], Value, Key)(T aa) @property
+{
+    // ensure we are dealing with a genuine AA.
+    static if (is(const(Value[Key]) == const(T)))
+        alias realAA = aa;
+    else
+        const(Value[Key]) realAA = aa;
+    auto res = () @trusted {
+        auto a = cast(void[])_aaValues(*cast(inout(AA)*)&realAA, Key.sizeof, Value.sizeof, typeid(Value[]));
+        return *cast(Value[]*)&a;
+    }();
+    static if (__traits(hasPostblit, Value))
+        _doPostblit(res);
+    return res;
+}
+
+/** ditto */
+Value[] values(T : Value[Key], Value, Key)(T *aa) @property
+{
+    return (*aa).values;
+}
+inout(V) get(K, V)(inout(V[K]) aa, K key, lazy inout(V) defaultValue)
+{
+    auto p = key in aa;
+    return p ? *p : defaultValue;
+}
+
+/** ditto */
+inout(V) get(K, V)(inout(V[K])* aa, K key, lazy inout(V) defaultValue)
+{
+    return (*aa).get(key, defaultValue);
+}
+// Tests whether T can be @safe-ly copied. Use a union to exclude destructor from the test.
+private enum bool isSafeCopyable(T) = is(typeof(() @safe { union U { T x; } T *x; auto u = U(*x); }));
+
+/***********************************
+ * Looks up key; if it exists applies the update callable else evaluates the
+ * create callable and adds it to the associative array
+ * Params:
+ *      aa =     The associative array.
+ *      key =    The key.
+ *      create = The callable to apply on create.
+ *      update = The callable to apply on update.
+ */
+void update(K, V, C, U)(ref V[K] aa, K key, scope C create, scope U update)
+if (is(typeof(create()) : V) && (is(typeof(update(aa[K.init])) : V) || is(typeof(update(aa[K.init])) == void)))
+{
+    bool found;
+    // if key is @safe-ly copyable, `update` may infer @safe
+    static if (isSafeCopyable!K)
+    {
+        auto p = () @trusted
+        {
+            return cast(V*) _aaGetX(cast(AA*) &aa, typeid(V[K]), V.sizeof, &key, found);
+        } ();
+    }
+    else
+    {
+        auto p = cast(V*) _aaGetX(cast(AA*) &aa, typeid(V[K]), V.sizeof, &key, found);
+    }
+    if (!found)
+        *p = create();
+    else
+    {
+        static if (is(typeof(update(*p)) == void))
+            update(*p);
+        else
+            *p = update(*p);
+    }
+}
+
+ref V require(K, V)(ref V[K] aa, K key, lazy V value = V.init)
+{
+    bool found;
+    // if key is @safe-ly copyable, `require` can infer @safe
+    static if (isSafeCopyable!K)
+    {
+        auto p = () @trusted
+        {
+            return cast(V*) _aaGetX(cast(AA*) &aa, typeid(V[K]), V.sizeof, &key, found);
+        } ();
+    }
+    else
+    {
+        auto p = cast(V*) _aaGetX(cast(AA*) &aa, typeid(V[K]), V.sizeof, &key, found);
+    }
+    if (found)
+        return *p;
+    else
+    {
+        *p = value; // Not `return (*p = value)` since if `=` is overloaded
+        return *p;  // this might not return a ref to the left-hand side.
+    }
+}
+
+
+
+/***********************************
+ * Removes all remaining keys and values from an associative array.
+ * Params:
+ *      aa =     The associative array.
+ */
+void clear(Value, Key)(Value[Key] aa)
+{
+    _aaClear(*cast(AA *) &aa);
+}
+
+/** ditto */
+void clear(Value, Key)(Value[Key]* aa)
+{
+    _aaClear(*cast(AA *) aa);
+}
+void* aaLiteral(Key, Value)(Key[] keys, Value[] values) @trusted pure
+{
+    return _d_assocarrayliteralTX(typeid(Value[Key]), *cast(void[]*)&keys, *cast(void[]*)&values);
+}
+
+alias AssociativeArray(Key, Value) = Value[Key];
+
+class TypeInfo_AssociativeArray : TypeInfo
+{
+    override string toString() const
+    {
+        return value.toString() ~ "[" ~ key.toString() ~ "]";
+    }
+
+    override bool opEquals(Object o)
+    {
+        if (this is o)
+            return true;
+        auto c = cast(const TypeInfo_AssociativeArray)o;
+        return c && this.key == c.key &&
+                    this.value == c.value;
+    }
+
+    override bool equals(in void* p1, in void* p2) @trusted const
+    {
+        return !!_aaEqual(this, *cast(const AA*) p1, *cast(const AA*) p2);
+    }
+
+    override size_t getHash(scope const void* p) nothrow @trusted const
+    {
+        return _aaGetHash(cast(AA*)p, this);
+    }
+
+    // BUG: need to add the rest of the functions
+
+    override @property size_t size() nothrow pure const
+    {
+        return (char[int]).sizeof;
+    }
+
+    override const(void)[] initializer() const @trusted
+    {
+        return (cast(void *)null)[0 .. (char[int]).sizeof];
+    }
+
+    override @property inout(TypeInfo) next() nothrow pure inout { return value; }
+    override @property uint flags() nothrow pure const { return 1; }
+
+
+    TypeInfo value;
+    TypeInfo key;
+
+    override @property size_t talign() nothrow pure const
+    {
+        return (char[int]).alignof;
+    }
+
+    version (WithArgTypes) override int argTypes(out TypeInfo arg1, out TypeInfo arg2)
+    {
+        arg1 = typeid(void*);
+        return 0;
+    }
+}
+
+
 
 class TypeInfo_Enum : TypeInfo {
     TypeInfo base;
@@ -559,7 +1143,8 @@ class TypeInfo_Enum : TypeInfo {
 
     override size_t size() const { return base.size; }
     override const(TypeInfo) next() const { return base.next; }
-    override bool equals(void* p1, void* p2) { return base.equals(p1, p2); }
+    override bool equals(in void* p1, in void* p2) const { return base.equals(p1, p2); }
+	override @property size_t talign() const { return base.talign; }
 }
 
 extern (C) void[] _d_newarrayU(const scope TypeInfo ti, size_t length)
@@ -573,6 +1158,68 @@ extern(C) void[] _d_newarrayT(const TypeInfo ti, size_t length)
 	
 	(cast(byte[])arr)[] = 0;
 	return arr;
+}
+
+extern(C) void[] _d_newarrayiT(const TypeInfo ti, size_t length)
+{
+	auto result = _d_newarrayU(ti, length);
+	auto tinext = ti.next;
+	auto size = tinext.size;
+	auto init = tinext.initializer();
+	switch (init.length)
+	{
+		foreach (T; AliasSeq!(ubyte, ushort, uint, ulong))
+		{
+		case T.sizeof:
+			if (tinext.talign % T.alignof == 0)
+			{
+				(cast(T*)result.ptr)[0 .. size * length / T.sizeof] = *cast(T*)init.ptr;
+				return result;
+			}
+			goto default;
+		}
+
+		default:
+		{
+			immutable sz = init.length;
+			for (size_t u = 0; u < size * length; u += sz)
+			{
+				memcpy(result.ptr + u, init.ptr, sz);
+			}
+			return result;
+		}
+	}
+	return result;
+}
+
+extern (C) void* _d_newitemU(scope const TypeInfo _ti)
+{
+	import core.arsd.objectutils;
+    auto ti =  cast()_ti;
+    immutable tiSize = structTypeInfoSize(ti);
+    immutable itemSize = ti.size;
+    immutable size = itemSize + tiSize;
+    auto p = malloc(size);
+
+    return p.ptr;
+}
+
+/// ditto
+extern (C) void* _d_newitemT(in TypeInfo _ti)
+{
+    auto p = _d_newitemU(_ti);
+    memset(p, 0, _ti.size);
+    return p;
+}
+
+/// Same as above, for item with non-zero initializer.
+extern (C) void* _d_newitemiT(in TypeInfo _ti)
+{
+    auto p = _d_newitemU(_ti);
+    auto init = _ti.initializer();
+    assert(init.length <= _ti.size);
+    memcpy(p, init.ptr, init.length);
+    return p;
 }
 
 
@@ -617,7 +1264,7 @@ template _d_arraysetlengthTImpl(Tarr : T[], T) {
 		if(newlength <= arr.length) {
 			arr = arr[0 ..newlength];
 		} else {
-			auto ptr = cast(T*) realloc(cast(ubyte*) arr.ptr, newlength * T.sizeof);
+			auto ptr = cast(T*) realloc(cast(ubyte[])arr, newlength * T.sizeof);
 			arr = ptr[0 .. newlength];
 			if(orig !is null) {
 				arr[0 .. orig.length] = orig[];
@@ -637,7 +1284,7 @@ extern (C) byte[] _d_arrayappendcTX(const TypeInfo ti, ref byte[] px, size_t n) 
 	if(px.ptr is null)
 		ptr = malloc(newSize).ptr;
 	else // FIXME: anti-stomping by checking length == used
-		ptr = realloc(cast(ubyte*) px.ptr, newSize).ptr;
+		ptr = realloc(cast(ubyte[])px, newSize).ptr;
 	auto ns = ptr[0 .. newSize];
 	auto op = px.ptr;
 	auto ol = px.length * elemSize;
@@ -650,6 +1297,8 @@ extern (C) byte[] _d_arrayappendcTX(const TypeInfo ti, ref byte[] px, size_t n) 
 	return px;
 }
 
+
+version(inline_concat)
 extern(C) void[] _d_arraycatnTX(const TypeInfo ti, scope byte[][] arrs) @trusted
 {
 	auto elemSize = ti.next.size;
@@ -674,21 +1323,114 @@ extern(C) void[] _d_arraycatnTX(const TypeInfo ti, scope byte[][] arrs) @trusted
 	return cast(void[])ptr[0..length];
 }
 
+version(inline_concat)
+extern (C) byte[] _d_arraycatT(const TypeInfo ti, byte[] x, byte[] y)
+{
+    import core.arsd.objectutils;
+    auto sizeelem = ti.next.size;              // array element size
+    size_t xlen = x.length * sizeelem;
+    size_t ylen = y.length * sizeelem;
+    size_t len  = xlen + ylen;
+
+    if (!len)
+        return null;
+
+    byte[] p = cast(byte[])malloc(len);
+    p[len] = 0; // guessing this is to optimize for null-terminated arrays?
+    memcpy(p.ptr, x.ptr, xlen);
+    memcpy(p.ptr + xlen, y.ptr, ylen);
+    // do postblit processing
+    __doPostblit(p.ptr, xlen + ylen, ti.next);
+    return p[0 .. x.length + y.length];
+}
+
+extern (C) void[] _d_arrayappendcd(ref byte[] x, dchar c)
+{
+    // c could encode into from 1 to 4 characters
+    char[4] buf = void;
+    byte[] appendthis; // passed to appendT
+    if (c <= 0x7F)
+    {
+        buf.ptr[0] = cast(char)c;
+        appendthis = (cast(byte *)buf.ptr)[0..1];
+    }
+    else if (c <= 0x7FF)
+    {
+        buf.ptr[0] = cast(char)(0xC0 | (c >> 6));
+        buf.ptr[1] = cast(char)(0x80 | (c & 0x3F));
+        appendthis = (cast(byte *)buf.ptr)[0..2];
+    }
+    else if (c <= 0xFFFF)
+    {
+        buf.ptr[0] = cast(char)(0xE0 | (c >> 12));
+        buf.ptr[1] = cast(char)(0x80 | ((c >> 6) & 0x3F));
+        buf.ptr[2] = cast(char)(0x80 | (c & 0x3F));
+        appendthis = (cast(byte *)buf.ptr)[0..3];
+    }
+    else if (c <= 0x10FFFF)
+    {
+        buf.ptr[0] = cast(char)(0xF0 | (c >> 18));
+        buf.ptr[1] = cast(char)(0x80 | ((c >> 12) & 0x3F));
+        buf.ptr[2] = cast(char)(0x80 | ((c >> 6) & 0x3F));
+        buf.ptr[3] = cast(char)(0x80 | (c & 0x3F));
+        appendthis = (cast(byte *)buf.ptr)[0..4];
+    }
+    else
+        assert(false, "Could not append dchar");      // invalid utf character - should we throw an exception instead?
+
+    //
+    // TODO: This always assumes the array type is shared, because we do not
+    // get a typeinfo from the compiler.  Assuming shared is the safest option.
+    // Once the compiler is fixed, the proper typeinfo should be forwarded.
+    //
+    return _d_arrayappendT(typeid(shared char[]), x, appendthis);
+}
+
+
+
+
 alias AliasSeq(T...) = T;
 static foreach(type; AliasSeq!(byte, char, dchar, double, float, int, long, short, ubyte, uint, ulong, ushort, void, wchar)) {
 	mixin(q{
 		class TypeInfo_}~type.mangleof~q{ : TypeInfo {
+            override string toString() const pure nothrow @safe { return type.stringof; }
 			override size_t size() const { return type.sizeof; }
-			override bool equals(void* a, void* b) {
+            override @property size_t talign() const pure nothrow
+            {
+                return type.alignof;
+            }
+
+			override bool equals(in void* a, in void* b) const {
 				static if(is(type == void))
 					return false;
 				else
 				return (*(cast(type*) a) == (*(cast(type*) b)));
 			}
+            static if(!is(type == void))
+            override size_t getHash(scope const void* p) @trusted const nothrow
+            {
+                return hashOf(*cast(const type *)p);
+            }
+			override const(void)[] initializer() pure nothrow @trusted const
+			{
+				static if(__traits(isZeroInit, type))
+					return (cast(void*)null)[0 .. type.sizeof];
+				else
+				{
+					static immutable type[1] c;
+					return c;
+				}
+			}
 		}
 		class TypeInfo_A}~type.mangleof~q{ : TypeInfo_Array {
+            override string toString() const { return (type[]).stringof; }
 			override const(TypeInfo) next() const { return typeid(type); }
-			override bool equals(void* av, void* bv) {
+            override size_t getHash(scope const void* p) @trusted const nothrow
+            {
+                return hashOf(*cast(const type[]*) p);
+            }
+
+			override bool equals(in void* av, in void* bv) const {
 				type[] a = *(cast(type[]*) av);
 				type[] b = *(cast(type[]*) bv);
 
@@ -729,6 +1471,21 @@ class TypeInfo_Delegate : TypeInfo {
 	TypeInfo next;
 	string deco;
 	override size_t size() const { return size_t.sizeof * 2; }
+	override bool equals(in void* p1, in void* p2) const
+    {
+        auto dg1 = *cast(void delegate()*)p1;
+        auto dg2 = *cast(void delegate()*)p2;
+        return dg1 == dg2;
+    }
+	override const(void)[] initializer() const @trusted
+    {
+        return (cast(void *)null)[0 .. (int delegate()).sizeof];
+    }
+	override @property size_t talign() nothrow pure const
+    {
+        alias dg = int delegate();
+        return dg.alignof;
+    }
 }
 
 
@@ -759,12 +1516,13 @@ class TypeInfo_Interface : TypeInfo
 }
 
 class TypeInfo_Const : TypeInfo {
-	size_t getHash(in void*) nothrow { return 0; }
+	override size_t getHash(scope const(void*) p) @trusted const nothrow { return base.getHash(p); }
 	TypeInfo base;
 	override size_t size() const { return base.size; }
 	override const(TypeInfo) next() const { return base.next; }
-
-	override bool equals(void* p1, void* p2) { return base.equals(p1, p2); 	}
+	override const(void)[] initializer() nothrow pure const{return base.initializer();}
+    override @property size_t talign() nothrow pure const { return base.talign; }
+	override bool equals(in void* p1, in void* p2) const { return base.equals(p1, p2); 	}
 }
 /+
 class TypeInfo_Immutable : TypeInfo {
@@ -773,19 +1531,19 @@ class TypeInfo_Immutable : TypeInfo {
 }
 +/
 class TypeInfo_Invariant : TypeInfo {
-	size_t getHash(in void*) nothrow { return 0; }
 	TypeInfo base;
+	override size_t getHash(scope const (void*) p) @trusted const nothrow { return base.getHash(p); }
 	override size_t size() const { return base.size; }
 	override const(TypeInfo) next() const { return base; }
 }
 class TypeInfo_Shared : TypeInfo {
-	size_t getHash(in void*) nothrow { return 0; }
+	override size_t getHash(scope const (void*) p) @trusted const nothrow { return base.getHash(p); }
 	TypeInfo base;
 	override size_t size() const { return base.size; }
 	override const(TypeInfo) next() const { return base; }
 }
 class TypeInfo_Inout : TypeInfo {
-	size_t getHash(in void*) nothrow { return 0; }
+	override size_t getHash(scope const (void*) p) @trusted const nothrow { return base.getHash(p); }
 	TypeInfo base;
 	override size_t size() const { return base.size; }
 	override const(TypeInfo) next() const { return base; }
@@ -794,21 +1552,56 @@ class TypeInfo_Inout : TypeInfo {
 class TypeInfo_Struct : TypeInfo {
 	string name;
 	void[] m_init;
-	void* xtohash;
-	 bool     function(in void*, in void*) xopEquals;
+    @safe pure nothrow
+    {
+    size_t   function(in void*)           xtoHash;
+	bool     function(in void*, in void*) xopEquals;
 	int      function(in void*, in void*) xopCmp;
-	void* xtostring;
-	uint flags;
+    string   function(in void*)           xtoString;
+    }
+	uint m_flags;
 	union {
-		void function(void*) dtor;
-		void function(void*, const TypeInfo_Struct) xdtor;
+		void function(void*) xdtor;
+		void function(void*, const TypeInfo_Struct) xdtorti;
 	}
-	void function(void*) postblit;
+	void function(void*) xpostblit;
 	uint align_;
 	immutable(void)* rtinfo;
-	override size_t size() const { return m_init.length; }
 
-    override bool equals(in void* p1, in void* p2) @trusted
+	enum StructFlags : uint
+	{
+		hasPointers = 0x1,
+		isDynamicType = 0x2, // built at runtime, needs type info in xdtor
+	}
+	override size_t size() const { return m_init.length; }
+	override @property uint flags() nothrow pure const @safe @nogc { return m_flags; }
+
+    override size_t toHash() const
+    {
+        return hashOf(this.name);
+    }
+    override bool opEquals(Object o)
+    {
+        if (this is o)
+            return true;
+        auto s = cast(const TypeInfo_Struct)o;
+        return s && this.name == s.name;
+    }
+    override size_t getHash(scope const void* p) @trusted pure nothrow const
+    {
+        assert(p);
+        if (xtoHash)
+        {
+            return (*xtoHash)(p);
+        }
+        else
+        {
+            return hashOf(p[0 .. initializer().length]);
+        }
+    }
+
+
+    override bool equals(in void* p1, in void* p2) @trusted const
     {
         if (!p1 || !p2)
             return false;
@@ -820,12 +1613,40 @@ class TypeInfo_Struct : TypeInfo {
             // BUG: relies on the GC not moving objects
             return memcmp(p1, p2, m_init.length) == 0;
     }
+	override @property size_t talign() nothrow pure const { return align_; }
+	final override void destroy(void* p) const
+    {
+        if (xdtor)
+        {
+            if (m_flags & StructFlags.isDynamicType)
+                (*xdtorti)(p, this);
+            else
+                (*xdtor)(p);
+        }
+    }
+
+    override void postblit(void* p) const
+    {
+        if (xpostblit)
+            (*xpostblit)(p);
+    }
+
+	override const(void)[] initializer() nothrow pure const @safe
+	{
+		return m_init;
+	}
 
 }
 
 extern(C) bool _xopCmp(in void*, in void*) { return false; }
 
 // }
+
+void __ArrayDtor(T)(scope T[] a)
+{
+    foreach_reverse (ref T e; a)
+        e.__xdtor();
+}
 
 TTo[] __ArrayCast(TFrom, TTo)(return scope TFrom[] from)
 {
@@ -889,3 +1710,5 @@ immutable(T)[] idup(T)(scope const(T)[] array) pure nothrow @trusted
 	}
 	return result;
 }
+
+import core.internal.hash;
