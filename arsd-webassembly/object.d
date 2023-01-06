@@ -1336,7 +1336,6 @@ extern (C) byte[] _d_arraycatT(const TypeInfo ti, byte[] x, byte[] y)
         return null;
 
     byte[] p = cast(byte[])malloc(len);
-    p[len] = 0; // guessing this is to optimize for null-terminated arrays?
     memcpy(p.ptr, x.ptr, xlen);
     memcpy(p.ptr + xlen, y.ptr, ylen);
     // do postblit processing
