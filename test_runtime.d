@@ -76,5 +76,8 @@ void main()
 	string strTest = "test"[0..$];
 	assert(strTest == "test");
 
+	foreach(dchar ch; "こんいちは")
+		writeln(ch);
+
 }
 

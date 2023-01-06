@@ -323,6 +323,7 @@ extern(C) int memcmp(const(void)* s1, const(void*) s2, size_t n) pure @nogc noth
 	return 0;
 }
 
+public import core.arsd.utf_decoding;
 
 // }
 
@@ -1302,6 +1303,29 @@ extern(C) void[] _d_arraycatnTX(const TypeInfo ti, scope byte[][] arrs) @trusted
 	}
 	return cast(void[])ptr[0..length];
 }
+
+version(inline_concat)
+extern (C) byte[] _d_arraycatT(const TypeInfo ti, byte[] x, byte[] y)
+{
+    import core.arsd.objectutils;
+    auto sizeelem = ti.next.size;              // array element size
+    size_t xlen = x.length * sizeelem;
+    size_t ylen = y.length * sizeelem;
+    size_t len  = xlen + ylen;
+
+    if (!len)
+        return null;
+
+    byte[] p = cast(byte[])malloc(len);
+    p[len] = 0; // guessing this is to optimize for null-terminated arrays?
+    memcpy(p.ptr, x.ptr, xlen);
+    memcpy(p.ptr + xlen, y.ptr, ylen);
+    // do postblit processing
+    __doPostblit(p.ptr, xlen + ylen, ti.next);
+    return p[0 .. x.length + y.length];
+}
+
+
 
 
 alias AliasSeq(T...) = T;
