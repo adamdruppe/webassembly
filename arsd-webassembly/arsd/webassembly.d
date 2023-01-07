@@ -140,8 +140,10 @@ struct MethodsHelper {
 	private this(int handle) { this.handle = handle; }
 
 	template opDispatch(string name) {
-		template opDispatch(T = NativeHandle) {
-			T opDispatch(Args...)(Args args, string callingModuleName = __MODULE__) @trusted @nogc pure {
+		template opDispatch(T = NativeHandle) 
+		{
+			T opDispatch(Args...)(Args args, string callingModuleName = __MODULE__) @trusted @nogc pure 
+			{
 				return eval!T(q{
 					return $0[$1].apply($0, Array.prototype.slice.call(arguments, 2));
 				}, NativeHandle(this.handle, false), name, args, callingModuleName);

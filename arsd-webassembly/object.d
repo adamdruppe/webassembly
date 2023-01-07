@@ -1505,6 +1505,34 @@ class TypeInfo_Aya : TypeInfo_Aa {
 
 }
 
+class TypeInfo_Function : TypeInfo
+{
+    override string toString() const pure @trusted{return deco;}
+    override bool opEquals(Object o)
+    {
+        if (this is o)
+            return true;
+        auto c = cast(const TypeInfo_Function)o;
+        return c && this.deco == c.deco;
+    }
+
+    // BUG: need to add the rest of the functions
+
+    override @property size_t size() nothrow pure const
+    {
+        return 0;       // no size for functions
+    }
+    override const(void)[] initializer() const @safe{return null;}
+    TypeInfo _next;
+    override const(TypeInfo) next()nothrow pure inout @nogc  { return _next; }
+
+    /**
+    * Mangled function type string
+    */
+    string deco;
+}
+
+
 class TypeInfo_Delegate : TypeInfo {
 	TypeInfo next;
 	string deco;
