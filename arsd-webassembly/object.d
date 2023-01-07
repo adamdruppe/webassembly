@@ -8,6 +8,7 @@ version(CarelessAlocation)
 	version = inline_concat;
 }
 
+alias noreturn = typeof(*null);
 alias string = immutable(char)[];
 alias wstring = immutable(wchar)[];
 alias dstring = immutable(dchar)[];
