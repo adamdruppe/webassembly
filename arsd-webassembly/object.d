@@ -8,6 +8,7 @@ version(CarelessAlocation)
 	version = inline_concat;
 }
 
+alias noreturn = typeof(*null);
 alias string = immutable(char)[];
 alias wstring = immutable(wchar)[];
 alias dstring = immutable(dchar)[];
@@ -1189,7 +1190,6 @@ extern(C) void[] _d_newarrayiT(const TypeInfo ti, size_t length)
 			return result;
 		}
 	}
-	return result;
 }
 
 extern (C) void* _d_newitemU(scope const TypeInfo _ti)
