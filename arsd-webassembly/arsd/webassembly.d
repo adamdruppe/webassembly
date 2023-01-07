@@ -3,22 +3,22 @@
 +/
 module arsd.webassembly;
 
-// the basic bridge functions defined in webassembly-core.js {
-
-extern(C) void retain(int);
-extern(C) void release(int);
-
 struct AcquireArgument {
 	int type;
 	const(void)* ptr;
 	int length;
 }
 
-extern(C) int acquire(int returnType, string callingModuleName, string code, AcquireArgument[] arguments);
+// the basic bridge functions defined in webassembly-core.js {
 
-extern(C) void abort();
-
-extern(C) int monotimeNow();
+@trusted @nogc pure
+{
+	extern(C) void retain(int);
+	extern(C) void release(int);
+	extern(C) int acquire(int returnType, string callingModuleName, string code, AcquireArgument[] arguments);
+	extern(C) void abort();
+	extern(C) int monotimeNow();
+}
 
 
 // }
@@ -47,7 +47,7 @@ export extern(C) int invoke_d_array_delegate(size_t ptr, size_t funcptr, ubyte[]
 	Right: `eval!NativeHandle("return document");`
 +/
 template eval(T = void) {
-	T eval(Args...)(string code, Args args, string callingModuleName = __MODULE__) {
+	T eval(Args...)(string code, Args args, string callingModuleName = __MODULE__) @trusted @nogc pure {
 		AcquireArgument[Args.length] aa;
 		foreach(idx, ref arg; args) {
 			// FIXME: some other type for unsigned....
@@ -102,6 +102,8 @@ template eval(T = void) {
 // and do some opDispatch on the native things to call their methods and it should look p cool
 
 struct NativeHandle {
+	@trusted @nogc pure:
+
 	int handle;
 	bool arc;
 	this(int handle, bool arc = true) {
@@ -130,6 +132,7 @@ struct NativeHandle {
 }
 
 struct MethodsHelper {
+	@trusted @nogc pure:
 	@disable this();
 	@disable this(this);
 
@@ -138,7 +141,7 @@ struct MethodsHelper {
 
 	template opDispatch(string name) {
 		template opDispatch(T = NativeHandle) {
-			T opDispatch(Args...)(Args args, string callingModuleName = __MODULE__) {
+			T opDispatch(Args...)(Args args, string callingModuleName = __MODULE__) @trusted @nogc pure {
 				return eval!T(q{
 					return $0[$1].apply($0, Array.prototype.slice.call(arguments, 2));
 				}, NativeHandle(this.handle, false), name, args, callingModuleName);
@@ -148,6 +151,7 @@ struct MethodsHelper {
 
 }
 struct PropertiesHelper {
+	@trusted @nogc pure:
 	@disable this();
 	@disable this(this);
 

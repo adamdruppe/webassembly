@@ -276,6 +276,12 @@ extern(C) bool _xopEquals(in void*, in void*) { return false; } // assert(0);
 
 // basic array support {
 
+template _arrayOp(Args...)
+{
+    import core.internal.array.operations;
+    alias _arrayOp = arrayOp!Args;
+}
+
 extern(C) void _d_array_slice_copy(void* dst, size_t dstlen, void* src, size_t srclen, size_t elemsz) {
 	auto d = cast(ubyte*) dst;
 	auto s = cast(ubyte*) src;
@@ -347,18 +353,19 @@ public import core.arsd.utf_decoding;
 
 // }
 
-extern(C) void _d_assert(string file, uint line) {
+extern(C) void _d_assert(string file, uint line)  @trusted @nogc pure
+{
 	arsd.webassembly.eval(q{ console.error("Assert failure: " + $0 + ":" + $1); /*, "[" + $2 + ".." + $3 + "] <> " + $4);*/ }, file, line);//, lwr, upr, length);
 	arsd.webassembly.abort();
 }
 
-extern(C) void _d_assert_msg(string msg, string file, uint line)
+extern(C) void _d_assert_msg(string msg, string file, uint line) @trusted @nogc pure
 {
 	arsd.webassembly.eval(q{ console.error("Assert failure: " + $0 + ":" + $1 + "(" + $2 + ")"); /*, "[" + $2 + ".." + $3 + "] <> " + $4);*/ }, file, line, msg);//, lwr, upr, length);
 	arsd.webassembly.abort();
 }
 
-void __switch_error(string file, size_t line)
+void __switch_error(string file, size_t line) @trusted @nogc pure
 {
 	_d_assert_msg("final switch error",file, line);
 }
@@ -820,6 +827,38 @@ void destroy(bool initialize = true, T)(ref T obj) if (is(T == struct))
         import core.internal.lifetime : emplaceInitializer;
         emplaceInitializer(obj); // emplace T.init
     }
+}
+void destroy(bool initialize = true, T)(T obj) if (is(T == class))
+{
+    static if (__traits(getLinkage, T) == "C++")
+    {
+        static if (__traits(hasMember, T, "__xdtor"))
+            obj.__xdtor();
+
+        static if (initialize)
+        {
+            const initializer = __traits(initSymbol, T);
+            (cast(void*)obj)[0 .. initializer.length] = initializer[];
+        }
+    }
+    else
+    {
+        // Bypass overloaded opCast
+        auto ptr = (() @trusted => *cast(void**) &obj)();
+        rt_finalize2(ptr, true, initialize);
+    }
+}
+void destroy(bool initialize = true, T)(T obj) if (is(T == interface))
+{
+    static assert(__traits(getLinkage, T) == "D", "Invalid call to destroy() on extern(" ~ __traits(getLinkage, T) ~ ") interface");
+
+    destroy!initialize(cast(Object)obj);
+}
+void destroy(bool initialize = true, T)(ref T obj)
+    if (!is(T == struct) && !is(T == interface) && !is(T == class) && !__traits(isStaticArray, T))
+{
+    static if (initialize)
+        obj = T.init;
 }
 
 
@@ -1709,5 +1748,188 @@ immutable(T)[] idup(T)(scope const(T)[] array) pure nothrow @trusted
 	}
 	return result;
 }
+
+class Error { this(string msg) {} }
+class Throwable : Object
+{
+    interface TraceInfo
+    {
+        int opApply(scope int delegate(ref const(char[]))) const;
+        int opApply(scope int delegate(ref size_t, ref const(char[]))) const;
+        string toString() const;
+    }
+
+    string      msg;    /// A message describing the error.
+
+    /**
+     * The _file name of the D source code corresponding with
+     * where the error was thrown from.
+     */
+    string      file;
+    /**
+     * The _line number of the D source code corresponding with
+     * where the error was thrown from.
+     */
+    size_t      line;
+
+    /**
+     * The stack trace of where the error happened. This is an opaque object
+     * that can either be converted to $(D string), or iterated over with $(D
+     * foreach) to extract the items in the stack trace (as strings).
+     */
+    TraceInfo   info;
+
+    /**
+     * A reference to the _next error in the list. This is used when a new
+     * $(D Throwable) is thrown from inside a $(D catch) block. The originally
+     * caught $(D Exception) will be chained to the new $(D Throwable) via this
+     * field.
+     */
+    private Throwable   nextInChain;
+
+    private uint _refcount;     // 0 : allocated by GC
+                                // 1 : allocated by _d_newThrowable()
+                                // 2.. : reference count + 1
+
+    /**
+     * Returns:
+     * A reference to the _next error in the list. This is used when a new
+     * $(D Throwable) is thrown from inside a $(D catch) block. The originally
+     * caught $(D Exception) will be chained to the new $(D Throwable) via this
+     * field.
+     */
+    @property inout(Throwable) next() @safe inout return scope pure nothrow @nogc { return nextInChain; }
+
+    /**
+     * Replace next in chain with `tail`.
+     * Use `chainTogether` instead if at all possible.
+     */
+    @property void next(Throwable tail) @safe scope pure nothrow @nogc{}
+
+    /**
+     * Returns:
+     *  mutable reference to the reference count, which is
+     *  0 - allocated by the GC, 1 - allocated by _d_newThrowable(),
+     *  and >=2 which is the reference count + 1
+     * Note:
+     *  Marked as `@system` to discourage casual use of it.
+     */
+    @system @nogc final pure nothrow ref uint refcount() return { return _refcount; }
+
+    /**
+     * Loop over the chain of Throwables.
+     */
+    int opApply(scope int delegate(Throwable) dg)
+    {
+        int result = 0;
+        for (Throwable t = this; t; t = t.nextInChain)
+        {
+            result = dg(t);
+            if (result)
+                break;
+        }
+        return result;
+    }
+
+    /**
+     * Append `e2` to chain of exceptions that starts with `e1`.
+     * Params:
+     *  e1 = start of chain (can be null)
+     *  e2 = second part of chain (can be null)
+     * Returns:
+     *  Throwable that is at the start of the chain; null if both `e1` and `e2` are null
+     */
+    static @system @nogc pure nothrow Throwable chainTogether(return scope Throwable e1, return scope Throwable e2)
+    {
+        if (!e1)
+            return e2;
+        if (!e2)
+            return e1;
+        if (e2.refcount())
+            ++e2.refcount();
+
+        for (auto e = e1; 1; e = e.nextInChain)
+        {
+            if (!e.nextInChain)
+            {
+                e.nextInChain = e2;
+                break;
+            }
+        }
+        return e1;
+    }
+
+    @nogc @safe pure nothrow this(string msg, Throwable nextInChain = null)
+    {
+        this.msg = msg;
+        this.nextInChain = nextInChain;
+        if (nextInChain && nextInChain._refcount)
+            ++nextInChain._refcount;
+        //this.info = _d_traceContext();
+    }
+
+    @nogc @safe pure nothrow this(string msg, string file, size_t line, Throwable nextInChain = null)
+    {
+        this(msg, nextInChain);
+        this.file = file;
+        this.line = line;
+        //this.info = _d_traceContext();
+    }
+
+    @trusted nothrow ~this(){}
+
+    /**
+     * Overrides $(D Object.toString) and returns the error message.
+     * Internally this forwards to the $(D toString) overload that
+     * takes a $(D_PARAM sink) delegate.
+     */
+    override string toString()
+    {
+        string s;
+        toString((in buf) { s ~= buf; });
+        return s;
+    }
+
+    /**
+     * The Throwable hierarchy uses a toString overload that takes a
+     * $(D_PARAM _sink) delegate to avoid GC allocations, which cannot be
+     * performed in certain error situations.  Override this $(D
+     * toString) method to customize the error message.
+     */
+    void toString(scope void delegate(in char[]) sink) const{}
+
+    /**
+     * Get the message describing the error.
+     * Base behavior is to return the `Throwable.msg` field.
+     * Override to return some other error message.
+     *
+     * Returns:
+     *  Error message
+     */
+    const(char)[] message() const
+    {
+        return this.msg;
+    }
+}
+class Exception : Throwable
+{
+
+    /**
+     * Creates a new instance of Exception. The nextInChain parameter is used
+     * internally and should always be $(D null) when passed by user code.
+     * This constructor does not automatically throw the newly-created
+     * Exception; the $(D throw) statement should be used for that purpose.
+     */
+    @nogc @safe pure nothrow this(string msg, string file = __FILE__, size_t line = __LINE__, Throwable nextInChain = null)
+    {
+        super(msg, file, line, nextInChain);
+    }
+
+    @nogc @safe pure nothrow this(string msg, Throwable nextInChain, string file = __FILE__, size_t line = __LINE__)
+    {
+        super(msg, file, line, nextInChain);
+    }
+}
+
 
 import core.internal.hash;
