@@ -1189,7 +1189,6 @@ extern(C) void[] _d_newarrayiT(const TypeInfo ti, size_t length)
 			return result;
 		}
 	}
-	return result;
 }
 
 extern (C) void* _d_newitemU(scope const TypeInfo _ti)
