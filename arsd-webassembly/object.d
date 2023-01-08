@@ -66,7 +66,7 @@ private struct AllocatedBlock {
 		checksum = blockSize ^ magic;
 	}
 
-	bool checkChecksum() const {
+	bool checkChecksum() const @nogc {
 		return magic == Magic && checksum == (blockSize ^ magic);
 	}
 
@@ -93,7 +93,7 @@ private struct AllocatedBlock {
 
 static assert(AllocatedBlock.sizeof % 16 == 0);
 
-void free(ubyte* ptr) {
+void free(ubyte* ptr) @nogc {
 	auto block = (cast(AllocatedBlock*) ptr) - 1;
 	if(!block.checkChecksum())
         assert(false, "Could not check block on free");
@@ -126,7 +126,11 @@ ubyte[] realloc(ubyte* ptr, size_t newSize, string file = __FILE__, size_t line 
 		if(ptr + block.blockSize == nextFree) {
 			while(growMemoryIfNeeded(newSize)) {}
 
-			block.blockSize = newSize + newSize % 16;
+            size_t blockSize = newSize;
+            if(blockSize % 16 > 0)
+                blockSize+= 16 - (blockSize % 16);
+
+			block.blockSize = blockSize;
 			block.used = newSize;
 			block.populateChecksum();
 			nextFree = ptr + block.blockSize;
@@ -170,7 +174,7 @@ ubyte[] realloc(ubyte[] ptr, size_t newSize, string file = __FILE__, size_t line
 private bool growMemoryIfNeeded(size_t sz) {
 	if(cast(size_t) nextFree + AllocatedBlock.sizeof + sz >= memorySize * 64*1024) {
 		if(llvm_wasm_memory_grow(0, 4) == size_t.max)
-			assert(0); // out of memory
+			assert(0, "Out of memory"); // out of memory
 
 		memorySize = llvm_wasm_memory_size(0);
 
@@ -330,7 +334,7 @@ extern(C) void* memset(void* s, int c, size_t n) {
 pragma(LDC_intrinsic, "llvm.memcpy.p0i8.p0i8.i#")
     void llvm_memcpy(T)(void* dst, const(void)* src, T len, bool volatile_ = false);
 
-extern(C) void *memcpy(void* dest, const(void)* src, size_t n)
+extern(C) void *memcpy(void* dest, const(void)* src, size_t n) pure @nogc nothrow
 {
 	ubyte *d = cast(ubyte*) dest;
 	const (ubyte) *s = cast(const(ubyte)*)src;
@@ -828,6 +832,33 @@ void destroy(bool initialize = true, T)(ref T obj) if (is(T == struct))
         emplaceInitializer(obj); // emplace T.init
     }
 }
+
+private extern (D) nothrow alias void function (Object) fp_t;
+private extern (C) void rt_finalize2(void* p, bool det = true, bool resetMemory = true) nothrow
+{
+    auto ppv = cast(void**) p;
+    if (!p || !*ppv)
+        return;
+
+    auto pc = cast(TypeInfo_Class*) *ppv;
+    if (det)
+    {
+        auto c = *pc;
+        do
+        {
+            if (c.destructor)
+                (cast(fp_t) c.destructor)(cast(Object) p); // call destructor
+        }
+        while ((c = c.base) !is null);
+    }
+
+    if (resetMemory)
+    {
+        auto w = (*pc).initializer;
+        p[0 .. w.length] = w[];
+    }
+    *ppv = null; // zero vptr even if `resetMemory` is false
+}
 void destroy(bool initialize = true, T)(T obj) if (is(T == class))
 {
     static if (__traits(getLinkage, T) == "C++")
@@ -936,7 +967,7 @@ extern (C)
 	private alias AA = void*;
 
     // size_t _aaLen(in AA aa) pure nothrow @nogc;
-    private void* _aaGetY(scope AA* paa, const TypeInfo_AssociativeArray ti, const size_t valsz, const scope void* pkey);
+    private void* _aaGetY(scope AA* paa, const TypeInfo_AssociativeArray ti, const size_t valsz, const scope void* pkey) pure nothrow;
     private void* _aaGetX(scope AA* paa, const TypeInfo_AssociativeArray ti, const size_t valsz, const scope void* pkey, out bool found) ;
     // inout(void)* _aaGetRvalueX(inout AA aa, in TypeInfo keyti, in size_t valsz, in void* pkey);
     inout(void[]) _aaValues(inout AA aa, const size_t keysz, const size_t valsz, const TypeInfo tiValueArray) ;
@@ -950,11 +981,11 @@ extern (C)
     // alias _dg2_t = extern(D) int delegate(void*, void*);
     // int _aaApply2(AA aa, size_t keysize, _dg2_t dg);
 
-    AARange _aaRange(AA aa);
-    bool _aaRangeEmpty(AARange r);
+    AARange _aaRange(AA aa) pure nothrow @nogc @safe;
+    bool _aaRangeEmpty(AARange r) pure @safe @nogc nothrow;
     void* _aaRangeFrontKey(AARange r);
-    void* _aaRangeFrontValue(AARange r);
-    void _aaRangePopFront(ref AARange r);
+    void* _aaRangeFrontValue(AARange r) pure @nogc nothrow;
+    void _aaRangePopFront(ref AARange r) pure @nogc nothrow @safe;
 
     int _aaEqual(scope const TypeInfo tiRaw, scope const AA aa1, scope const AA aa2);
     size_t _aaGetHash(scope const AA* aa, scope const TypeInfo tiRaw) nothrow;
@@ -966,6 +997,72 @@ extern (C)
         copiler allowed to create AA literal with keys, which have impure unsafe toHash methods.
     */
     void* _d_assocarrayliteralTX(const TypeInfo_AssociativeArray ti, void[] keys, void[] values);
+}
+
+private AARange _aaToRange(T: V[K], K, V)(ref T aa) pure nothrow @nogc @safe
+{
+    // ensure we are dealing with a genuine AA.
+    static if (is(const(V[K]) == const(T)))
+        alias realAA = aa;
+    else
+        const(V[K]) realAA = aa;
+    return _aaRange(() @trusted { return *cast(AA*)&realAA; } ());
+}
+
+auto byKey(T : V[K], K, V)(T aa) pure nothrow @nogc @safe
+{
+    import core.internal.traits : substInout;
+
+    static struct Result
+    {
+        AARange r;
+
+    pure nothrow @nogc:
+        @property bool empty()  @safe { return _aaRangeEmpty(r); }
+        @property ref front() @trusted
+        {
+            return *cast(substInout!K*) _aaRangeFrontKey(r);
+        }
+        void popFront() @safe { _aaRangePopFront(r); }
+        @property Result save() { return this; }
+    }
+
+    return Result(_aaToRange(aa));
+}
+
+/** ditto */
+auto byKey(T : V[K], K, V)(T* aa) pure nothrow @nogc
+{
+    return (*aa).byKey();
+}
+
+
+
+auto byValue(T : V[K], K, V)(T aa) pure nothrow @nogc @safe
+{
+    import core.internal.traits : substInout;
+
+    static struct Result
+    {
+        AARange r;
+
+    pure nothrow @nogc:
+        @property bool empty() @safe { return _aaRangeEmpty(r); }
+        @property ref front() @trusted
+        {
+            return *cast(substInout!V*) _aaRangeFrontValue(r);
+        }
+        void popFront() @safe { _aaRangePopFront(r); }
+        @property Result save() { return this; }
+    }
+
+    return Result(_aaToRange(aa));
+}
+
+/** ditto */
+auto byValue(T : V[K], K, V)(T* aa) pure nothrow @nogc
+{
+    return (*aa).byValue();
 }
 
 Key[] keys(T : Value[Key], Value, Key)(T aa) @property
@@ -1758,6 +1855,48 @@ extern (C) int _adEq2(void[] a1, void[] a2, TypeInfo ti)
         return 0;
     return 1;
 }
+
+V[K] dup(T : V[K], K, V)(T aa)
+{
+    //pragma(msg, "K = ", K, ", V = ", V);
+
+    // Bug10720 - check whether V is copyable
+    static assert(is(typeof({ V v = aa[K.init]; })),
+        "cannot call " ~ T.stringof ~ ".dup because " ~ V.stringof ~ " is not copyable");
+
+    V[K] result;
+
+    //foreach (k, ref v; aa)
+    //    result[k] = v;  // Bug13701 - won't work if V is not mutable
+
+    ref V duplicateElem(ref K k, ref const V v) @trusted pure nothrow
+    {
+        void* pv = _aaGetY(cast(AA*)&result, typeid(V[K]), V.sizeof, &k);
+        memcpy(pv, &v, V.sizeof);
+        return *cast(V*)pv;
+    }
+
+    foreach (k, ref v; aa)
+    {
+        static if (!__traits(hasPostblit, V))
+            duplicateElem(k, v);
+        else static if (__traits(isStaticArray, V))
+            _doPostblit(duplicateElem(k, v)[]);
+        else static if (!is(typeof(v.__xpostblit())) && is(immutable V == immutable UV, UV))
+            (() @trusted => *cast(UV*) &duplicateElem(k, v))().__xpostblit();
+        else
+            duplicateElem(k, v).__xpostblit();
+    }
+
+    return result;
+}
+
+/** ditto */
+V[K] dup(T : V[K], K, V)(T* aa)
+{
+    return (*aa).dup;
+}
+
 
 T[] dup(T)(scope const(T)[] array) pure nothrow @trusted if (__traits(isPOD, T))
 {
