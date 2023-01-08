@@ -300,24 +300,30 @@ extern(C) void _d_array_slice_copy(void* dst, size_t dstlen, void* src, size_t s
 
 }
 
-extern(C) void _d_arraybounds(string file, size_t line) { //, size_t lwr, size_t upr, size_t length) {
-	arsd.webassembly.eval(q{ console.error("Range error: " + $0 + ":" + $1); /*, "[" + $2 + ".." + $3 + "] <> " + $4);*/ }, file, line);//, lwr, upr, length);
+extern(C) void _d_arraybounds(string file, size_t line) {
+	arsd.webassembly.eval(
+        q{ console.error("Range error: " + $0 + ":" + $1 )}, 
+        file, line);
 	arsd.webassembly.abort();
 }
 
 
 /// Called when an out of range slice of an array is created
-extern(C) void _d_arraybounds_slice(string file, uint line, size_t, size_t, size_t)
+extern(C) void _d_arraybounds_slice(string file, uint line, size_t lwr, size_t upr, size_t length)
 {
-    // Ignore additional information for now
-    _d_arraybounds(file, line);
+    arsd.webassembly.eval(
+        q{ console.error("Range error: " + $0 + ":" + $1 + " [" + $2 + ".." + $3 + "] <> " + $4)}, 
+        file, line, lwr, upr, length);
+	arsd.webassembly.abort();
 }
 
 /// Called when an out of range array index is accessed
-extern(C) void _d_arraybounds_index(string file, uint line, size_t, size_t)
+extern(C) void _d_arraybounds_index(string file, uint line, size_t index, size_t length)
 {
-    // Ignore additional information for now
-    _d_arraybounds(file, line);
+    arsd.webassembly.eval(
+        q{ console.error("Array index " + $0  + " out of bounds '[0.."+$1+"]' " + $2 + ":" + $3)},
+        index, length, file, line);
+	arsd.webassembly.abort();
 }
 
 
