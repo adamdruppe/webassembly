@@ -127,8 +127,8 @@ ubyte[] realloc(ubyte* ptr, size_t newSize, string file = __FILE__, size_t line 
 			while(growMemoryIfNeeded(newSize)) {}
 
             size_t blockSize = newSize;
-            if(blockSize % 16 > 0)
-                blockSize+= 16 - (blockSize % 16);
+            if(const over = blockSize % 16)
+                blockSize+= 16 - over;
 
 			block.blockSize = blockSize;
 			block.used = newSize;
