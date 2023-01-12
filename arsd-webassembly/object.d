@@ -1296,11 +1296,18 @@ class TypeInfo_Enum : TypeInfo {
     override const(TypeInfo) next() const { return base.next; }
     override bool equals(in void* p1, in void* p2) const { return base.equals(p1, p2); }
 	override @property size_t talign() const { return base.talign; }
+    override void destroy(void* p) const { return base.destroy(p); }
+    override void postblit(void* p) const { return base.postblit(p); }
+
+    override const(void)[] initializer() const
+    {
+        return m_init.length ? m_init : base.initializer();
+    }
 }
 
 extern (C) void[] _d_newarrayU(const scope TypeInfo ti, size_t length)
 {
-	return malloc(length * ti.size); // FIXME size actually depends on ti
+	return malloc(length * ti.next.size); // FIXME size actually depends on ti
 }
 
 extern(C) void[] _d_newarrayT(const TypeInfo ti, size_t length)
@@ -1476,6 +1483,8 @@ extern(C) void[] _d_arraycatnTX(const TypeInfo ti, scope byte[][] arrs) @trusted
 version(inline_concat)
 extern (C) byte[] _d_arraycatT(const TypeInfo ti, byte[] x, byte[] y)
 {
+    import arsd.webassembly;
+    eval(q{console.log("We are in catT.")});
     import core.arsd.objectutils;
     auto sizeelem = ti.next.size;              // array element size
     size_t xlen = x.length * sizeelem;
