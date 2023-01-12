@@ -1307,13 +1307,12 @@ class TypeInfo_Enum : TypeInfo {
 
 extern (C) void[] _d_newarrayU(const scope TypeInfo ti, size_t length)
 {
-	return malloc(length * ti.next.size); // FIXME size actually depends on ti
+	return malloc(length * ti.next.size);
 }
 
 extern(C) void[] _d_newarrayT(const TypeInfo ti, size_t length)
 {
 	auto arr = _d_newarrayU(ti, length);
-	
 	(cast(byte[])arr)[] = 0;
 	return arr;
 }
