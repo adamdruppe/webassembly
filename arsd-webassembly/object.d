@@ -394,6 +394,7 @@ bool __equals(T1, T2)(scope const T1[] lhs, scope const T2[] rhs) {
 
 // bare basics class support {
 
+
 extern(C) Object _d_allocclass(TypeInfo_Class ti) {
 	auto ptr = malloc(ti.m_init.length);
 	ptr[] = ti.m_init[];
@@ -700,6 +701,13 @@ extern(C) double fmod(double f, double w) {
 extern(C) void* _d_allocmemory(size_t sz) {
 	return malloc(sz).ptr;
 }
+
+///For POD structures
+extern (C) void* _d_allocmemoryT(TypeInfo ti)
+{
+    return malloc(ti.size).ptr;
+}
+
 
 class Object
 {
@@ -1736,6 +1744,22 @@ class TypeInfo_Struct : TypeInfo {
 	void function(void*) xpostblit;
 	uint align_;
 	immutable(void)* rtinfo;
+    // private struct _memberFunc //? Is it necessary
+    // {
+    //     union
+    //     {
+    //         struct // delegate
+    //         {
+    //             const void* ptr;
+    //             const void* funcptr;
+    //         }
+    //         @safe pure nothrow
+    //         {
+    //             bool delegate(in void*) xopEquals;
+    //             int delegate(in void*) xopCmp;
+    //         }
+    //     }
+    // }
 
 	enum StructFlags : uint
 	{

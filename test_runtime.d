@@ -114,4 +114,26 @@ void main()
 	foreach(v; cast(ubyte[])arrCastTest)
 		writeln(v);
 
+
+
+	enum Type
+	{
+		int_,
+		string_,
+	}
+	struct TestWithPtr
+	{
+		int* a;
+		Type t = Type.string_;
+	}
+
+	TestWithPtr[] _;
+	_~= TestWithPtr(new int(50), Type.int_);
+	_ = _[0..$-1];
+	_~= TestWithPtr(new int(100), Type.string_);
+	_~= TestWithPtr(new int(150), Type.string_);
+	_~= TestWithPtr(new int(200), Type.int_);
+
+	foreach(v; _)
+		writeln(*v.a);
 }
