@@ -690,12 +690,12 @@ private int __switchSearch(T)(/*in*/ const scope T[][] cases, /*in*/ const scope
     return -1;
 }
 
+//TODO: Support someday?
+    extern(C) void _d_throw_exception(Throwable o)
+    {
+        assert(false, "Exception throw");
+    }
 
-// for floats
-extern(C) double fmod(double f, double w) {
-	auto i = cast(int) f;
-	return i % cast(int) w;
-}
 
 // for closures
 extern(C) void* _d_allocmemory(size_t sz) {
