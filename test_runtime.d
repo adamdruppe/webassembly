@@ -136,4 +136,20 @@ void main()
 
 	foreach(v; _)
 		writeln(*v.a);
+
+
+	char[] sup;
+	string rev;
+
+	// string test = null;
+	for(int i = 'a'; i <= 'z'; i++)
+	{
+		sup~= cast(char)i;
+		rev~= ('z' - cast(char)i) + 'a';
+	}
+
+
+	writeln((typeid(sup)).toString);
+
+	assert(false, sup~sup~sup);
 }

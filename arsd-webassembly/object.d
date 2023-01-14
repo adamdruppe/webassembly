@@ -368,6 +368,15 @@ extern(C) void _d_assert(string file, uint line)  @trusted @nogc pure
 	arsd.webassembly.eval(q{ console.error("Assert failure: " + $0 + ":" + $1); /*, "[" + $2 + ".." + $3 + "] <> " + $4);*/ }, file, line);//, lwr, upr, length);
 	arsd.webassembly.abort();
 }
+void _d_assertp(immutable(char)* file, uint line)
+{
+    // import core.stdc.string : strlen;
+    size_t sz = 0;
+    while(file[sz] != '\0') sz++;
+    arsd.webassembly.eval(q{ console.error("Assert failure: " + $0 + ":" + $1 + "(" + $2 + ")"); /*, "[" + $2 + ".." + $3 + "] <> " + $4);*/ }, file[0 .. sz], line);//, lwr, upr, length);
+	arsd.webassembly.abort();
+}
+
 
 extern(C) void _d_assert_msg(string msg, string file, uint line) @trusted @nogc pure
 {
@@ -1457,6 +1466,11 @@ extern (C) byte[] _d_arrayappendcTX(const TypeInfo ti, ref byte[] px, size_t n) 
 version(inline_concat)
 extern(C) void[] _d_arraycatnTX(const TypeInfo ti, scope byte[][] arrs) @trusted
 {
+    import arsd.webassembly;
+    eval(q{console.log.apply(null, ["_d_arraycatnTX", ...arguments]);}, arrs[0].length);
+    eval(q{console.log.apply(null, arguments);}, ti is null ? "true" : "false" );
+    eval(q{console.log.apply(null, arguments);}, ti.next is null);
+    eval(q{console.log.apply(null, arguments);}, ti.next.size);
 	auto elemSize = ti.next.size;
 	size_t length;
 	foreach (b; arrs)
@@ -1579,7 +1593,7 @@ static foreach(type; AliasSeq!(byte, char, dchar, double, float, int, long, shor
 		}
 		class TypeInfo_A}~type.mangleof~q{ : TypeInfo_Array {
             override string toString() const { return (type[]).stringof; }
-			override const(TypeInfo) next() const { return typeid(type); }
+			override const(TypeInfo) next() const { return cast(inout)typeid(type); }
             override size_t getHash(scope const void* p) @trusted const nothrow
             {
                 return hashOf(*cast(const type[]*) p);
@@ -1601,6 +1615,16 @@ static foreach(type; AliasSeq!(byte, char, dchar, double, float, int, long, shor
 		}
 	});
 }
+// typeof(null)
+class TypeInfo_n : TypeInfo
+{
+    const: pure: @nogc: nothrow: @safe:
+    override string toString() { return "typeof(null)"; }
+    override size_t getHash(scope const void*) { return 0; }
+    override bool equals(in void*, in void*) { return true; }
+    override @property size_t size() { return typeof(null).sizeof; }
+    override const(void)[] initializer() @trusted { return (cast(void *)null)[0 .. size_t.sizeof]; }
+}
 
 struct Interface {
 	TypeInfo_Class classinfo;
@@ -1618,6 +1642,9 @@ struct OffsetTypeInfo
     TypeInfo ti;        /// TypeInfo for this member
 }
 
+class TypeInfo_Axa : TypeInfo_Aa {
+    
+}
 class TypeInfo_Aya : TypeInfo_Aa {
 
 }
