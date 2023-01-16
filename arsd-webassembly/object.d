@@ -829,6 +829,12 @@ class TypeInfo_Class : TypeInfo
 	override @property size_t size() nothrow pure const
     { return Object.sizeof; }
 
+    override size_t getHash(scope const void* p) @trusted const
+    {
+        auto o = *cast(Object*)p;
+        return o ? o.toHash() : 0;
+    }
+
 	override bool equals(in void* p1, in void* p2) const
     {
         Object o1 = *cast(Object*)p1;
@@ -882,6 +888,11 @@ private extern (C) void rt_finalize2(void* p, bool det = true, bool resetMemory 
     }
     *ppv = null; // zero vptr even if `resetMemory` is false
 }
+extern(C) void _d_callfinalizer(void* p)
+{
+    rt_finalize2(p);
+}
+
 void destroy(bool initialize = true, T)(T obj) if (is(T == class))
 {
     static if (__traits(getLinkage, T) == "C++")
@@ -921,6 +932,11 @@ class TypeInfo_Pointer : TypeInfo
     TypeInfo m_next;
 
     override bool equals(in void* p1, in void* p2) const { return *cast(void**)p1 == *cast(void**)p2; }
+    override size_t getHash(scope const void* p) @trusted const
+    {
+        size_t addr = cast(size_t) *cast(const void**)p;
+        return addr ^ (addr >> 4);
+    }
     override @property size_t size() nothrow pure const { return (void*).sizeof; }
 
 	override const(void)[] initializer() const @trusted { return (cast(void *)null)[0 .. (void*).sizeof]; }
@@ -1675,7 +1691,11 @@ class TypeInfo_Function : TypeInfo
 class TypeInfo_Delegate : TypeInfo {
 	TypeInfo next;
 	string deco;
-	override size_t size() const { return size_t.sizeof * 2; }
+	override @property size_t size() nothrow pure const
+    {
+        alias dg = int delegate();
+        return dg.sizeof;
+    }
 	override bool equals(in void* p1, in void* p2) const
     {
         auto dg1 = *cast(void delegate()*)p1;
@@ -1686,6 +1706,11 @@ class TypeInfo_Delegate : TypeInfo {
     {
         return (cast(void *)null)[0 .. (int delegate()).sizeof];
     }
+    override size_t getHash(scope const void* p) @trusted const
+    {
+        return hashOf(*cast(const void delegate() *)p);
+    }
+
 	override @property size_t talign() nothrow pure const
     {
         alias dg = int delegate();
@@ -1708,6 +1733,17 @@ class TypeInfo_Interface : TypeInfo
 
         return o1 == o2 || (o1 && o1.opCmp(o2) == 0);
     }
+    override size_t getHash(scope const void* p) @trusted const
+    {
+        if (!*cast(void**)p)
+        {
+            return 0;
+        }
+        Interface* pi = **cast(Interface ***)*cast(void**)p;
+        Object o = cast(Object)(*cast(void**)p - pi.offset);
+        assert(o);
+        return o.toHash();
+    }
 
 	override const(void)[] initializer() const @trusted
     {
@@ -1729,6 +1765,30 @@ class TypeInfo_Const : TypeInfo {
     override @property size_t talign() nothrow pure const { return base.talign; }
 	override bool equals(in void* p1, in void* p2) const { return base.equals(p1, p2); 	}
 }
+
+
+///For some reason, getHash for interfaces wanted that
+pragma(mangle, "_D9invariant12_d_invariantFC6ObjectZv")
+extern(D) void _d_invariant(Object o)
+{
+    TypeInfo_Class c;
+
+    //printf("__d_invariant(%p)\n", o);
+
+    // BUG: needs to be filename/line of caller, not library routine
+    assert(o !is null); // just do null check, not invariant check
+
+    c = typeid(o);
+    do
+    {
+        if (c.classInvariant)
+        {
+            (*c.classInvariant)(o);
+        }
+        c = c.base;
+    } while (c);
+}
+
 /+
 class TypeInfo_Immutable : TypeInfo {
 	size_t getHash(in void*) nothrow { return 0; }
@@ -1954,6 +2014,16 @@ V[K] dup(T : V[K], K, V)(T* aa)
 {
     return (*aa).dup;
 }
+
+T[] dup(T)(scope T[] array) pure nothrow @trusted if (__traits(isPOD, T) && !is(const(T) : T))
+{
+	T[] result;
+	foreach(ref e; array) {
+		result ~= e;
+	}
+	return result;
+}
+
 
 
 T[] dup(T)(scope const(T)[] array) pure nothrow @trusted if (__traits(isPOD, T))
