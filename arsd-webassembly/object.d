@@ -348,10 +348,10 @@ extern(C) void *memcpy(void* dest, const(void)* src, size_t n) pure @nogc nothro
 	return dest;
 }
 
-extern(C) int memcmp(const(void)* s1, const(void*) s2, size_t n) pure @nogc nothrow @trusted {
+extern(C) int memcmp(const(void)* s1, const(void*) s2, size_t n) pure @nogc nothrow @trusted
+{
 	auto b = cast(ubyte*) s1;
 	auto b2 = cast(ubyte*) s2;
-
 	foreach(i; 0 .. n) {
 		if(auto diff = *b -  *b2)
 			return diff;
@@ -505,6 +505,8 @@ int __cmp(T)(scope const T[] lhs, scope const T[] rhs) @trusted pure @nogc nothr
 			}
 			return (s1.length > s2.length) - (s1.length < s2.length);
 		}
+        // import arsd.webassembly;
+        // eval(q{console.log.apply(null, arguments)}, cast(char[]) lhs, " vs ", cast(char[]) rhs);
         return dstrcmp(cast(char[]) lhs, cast(char[]) rhs);
     }
     else static if (!is(U == T))
@@ -631,6 +633,8 @@ int __switch(T, caseLabels...)(/*in*/ const scope T[] condition) pure nothrow @s
     else static if (caseLabels.length < 7)
     {
         int r = void;
+        import arsd.webassembly;
+        debug eval(q{console.error.apply(null,arguments);}, "Testing switch case: ", caseLabels.stringof);
         enum mid = cast(int)caseLabels.length / 2;
         if (condition.length == caseLabels[mid].length)
         {
