@@ -353,8 +353,10 @@ extern(C) int memcmp(const(void)* s1, const(void*) s2, size_t n) pure @nogc noth
 	auto b2 = cast(ubyte*) s2;
 
 	foreach(i; 0 .. n) {
-		if(auto diff = b -  b2)
+		if(auto diff = *b -  *b2)
 			return diff;
+		b++;
+		b2++;
 	}
 	return 0;
 }
