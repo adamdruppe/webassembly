@@ -505,8 +505,6 @@ int __cmp(T)(scope const T[] lhs, scope const T[] rhs) @trusted pure @nogc nothr
 			}
 			return (s1.length > s2.length) - (s1.length < s2.length);
 		}
-        // import arsd.webassembly;
-        // eval(q{console.log.apply(null, arguments)}, cast(char[]) lhs, " vs ", cast(char[]) rhs);
         return dstrcmp(cast(char[]) lhs, cast(char[]) rhs);
     }
     else static if (!is(U == T))
@@ -633,8 +631,6 @@ int __switch(T, caseLabels...)(/*in*/ const scope T[] condition) pure nothrow @s
     else static if (caseLabels.length < 7)
     {
         int r = void;
-        import arsd.webassembly;
-        debug eval(q{console.error.apply(null,arguments);}, "Testing switch case: ", caseLabels.stringof);
         enum mid = cast(int)caseLabels.length / 2;
         if (condition.length == caseLabels[mid].length)
         {
