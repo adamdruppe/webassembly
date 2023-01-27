@@ -1407,6 +1407,53 @@ extern (C) void* _d_newitemiT(in TypeInfo _ti)
 
 
 
+private void[] _d_newarrayOpT(alias op)(const TypeInfo ti, size_t[] dimensions)
+{
+    if (dimensions.length == 0)
+        return null;
+
+    void[] foo(const TypeInfo ti, size_t[] dimensions)
+    {
+        size_t count = dimensions[0];
+
+        if (dimensions.length == 1)
+        {
+            auto r = op(ti, count);
+            return (*cast(void[]*)(&r))[0..count];
+        }
+        void[] p = malloc((void[]).sizeof * count);
+
+        foreach (i; 0..count)
+        {
+            (cast(void[]*)p.ptr)[i] = foo(ti.next, dimensions[1..$]);
+        }
+        return p[0..count];
+    }
+
+    return foo(ti, dimensions);
+}
+
+
+extern (C) void[] _d_newarraymTX(const TypeInfo ti, size_t[] dims)
+{
+    if (dims.length == 0)
+        return null;
+    else
+        return _d_newarrayOpT!(_d_newarrayT)(ti, dims);
+}
+
+/// ditto
+extern (C) void[] _d_newarraymiTX(const TypeInfo ti, size_t[] dims)
+{
+    if (dims.length == 0)
+        return null;
+    else
+        return _d_newarrayOpT!(_d_newarrayiT)(ti, dims);
+}
+
+
+
+
 AllocatedBlock* getAllocatedBlock(void* ptr) {
 	auto block = (cast(AllocatedBlock*) ptr) - 1;
 	if(!block.checkChecksum())
