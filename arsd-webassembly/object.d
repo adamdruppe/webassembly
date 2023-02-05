@@ -327,7 +327,8 @@ extern(C) void _d_arraybounds_index(string file, uint line, size_t index, size_t
 }
 
 
-extern(C) void* memset(void* s, int c, size_t n) {
+extern(C) void* memset(void* s, int c, size_t n)  @nogc nothrow
+{
 	auto d = cast(ubyte*) s;
 	while(n) {
 		*d = cast(ubyte) c;
