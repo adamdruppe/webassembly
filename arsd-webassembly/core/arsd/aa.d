@@ -12,6 +12,7 @@ module core.arsd.aa;
 extern (C) immutable int _aaVersion = 1;
 
 import core.internal.hash;
+import core.arsd.memory_allocation;
 
 uint min(uint a, uint b) { return a < b ? a : b; }
 uint max(uint a, uint b) { return a > b ? a : b; }
