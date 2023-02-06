@@ -5,6 +5,60 @@ module core.arsd.memory_allocation;
 private __gshared ubyte* nextFree;
 private __gshared size_t memorySize; // in units of 64 KB pages
 
+// ldc defines this, used to find where wasm memory begins
+private extern extern(C) ubyte __heap_base;
+//                                           ---unused--- -- stack grows down -- -- heap here --
+// this is less than __heap_base. memory map 0 ... __data_end ... __heap_base ... end of memory
+private extern extern(C) ubyte __data_end;
+
+// llvm intrinsics {
+	/+
+		mem must be 0 (it is index of memory thing)
+		delta is in 64 KB pages
+		return OLD size in 64 KB pages, or size_t.max if it failed.
+	+/
+	pragma(LDC_intrinsic, "llvm.wasm.memory.grow.i32")
+	private int llvm_wasm_memory_grow(int mem, int delta);
+
+
+	// in 64 KB pages
+	pragma(LDC_intrinsic, "llvm.wasm.memory.size.i32")
+	private int llvm_wasm_memory_size(int mem);
+// }
+// debug
+void printBlockDebugInfo(AllocatedBlock* block) {
+	import std.stdio;
+	writeln(block.blockSize, " ", block.flags, " ", block.checkChecksum() ? "OK" : "X", " ");
+	if(block.checkChecksum())
+		writeln(cast(size_t)((cast(ubyte*) (block + 2)) + block.blockSize), " ", block.file, " : ", block.line);
+}
+
+
+// debug
+export extern(C) void printBlockDebugInfo(void* ptr) {
+	if(ptr is null) {
+		foreach(block; AllocatedBlock) {
+			printBlockDebugInfo(block);
+		}
+		return;
+	}
+
+	// otherwise assume it is a pointer returned from malloc
+
+	auto block = (cast(AllocatedBlock*) ptr) - 1;
+	if(ptr is null)
+		block = cast(AllocatedBlock*) &__heap_base;
+
+	printBlockDebugInfo(block);
+}
+
+
+export extern(C) ubyte* bridge_malloc(size_t sz) {
+	return malloc(sz).ptr;
+}
+
+
+
 align(16)
 struct AllocatedBlock {
 	enum Magic = 0x731a_9bec;
