@@ -11,7 +11,7 @@ struct AcquireArgument {
 
 // the basic bridge functions defined in webassembly-core.js {
 
-@trusted @nogc pure
+@trusted @nogc pure nothrow
 {
 	extern(C) void retain(int);
 	extern(C) void release(int);
