@@ -8,6 +8,8 @@ version(CarelessAlocation)
 	version = inline_concat;
 }
 
+import core.arsd.memory_allocation;
+
 alias noreturn = typeof(*null);
 alias string = immutable(char)[];
 alias wstring = immutable(wchar)[];
@@ -15,258 +17,6 @@ alias dstring = immutable(dchar)[];
 alias size_t = uint;
 alias ptrdiff_t = int;
 
-// ldc defines this, used to find where wasm memory begins
-private extern extern(C) ubyte __heap_base;
-//                                           ---unused--- -- stack grows down -- -- heap here --
-// this is less than __heap_base. memory map 0 ... __data_end ... __heap_base ... end of memory
-private extern extern(C) ubyte __data_end;
-
-// llvm intrinsics {
-	/+
-		mem must be 0 (it is index of memory thing)
-		delta is in 64 KB pages
-		return OLD size in 64 KB pages, or size_t.max if it failed.
-	+/
-	pragma(LDC_intrinsic, "llvm.wasm.memory.grow.i32")
-	private int llvm_wasm_memory_grow(int mem, int delta);
-
-
-	// in 64 KB pages
-	pragma(LDC_intrinsic, "llvm.wasm.memory.size.i32")
-	private int llvm_wasm_memory_size(int mem);
-// }
-
-
-
-private __gshared ubyte* nextFree;
-private __gshared size_t memorySize; // in units of 64 KB pages
-
-align(16)
-private struct AllocatedBlock {
-	enum Magic = 0x731a_9bec;
-	enum Flags {
-		inUse = 1,
-		unique = 2,
-	}
-
-	size_t blockSize;
-	size_t flags;
-	size_t magic;
-	size_t checksum;
-
-	size_t used; // the amount actually requested out of the block; used for assumeSafeAppend
-
-	/* debug */
-	string file;
-	size_t line;
-
-	// note this struct MUST align each alloc on an 8 byte boundary or JS is gonna throw bullshit
-
-	void populateChecksum() {
-		checksum = blockSize ^ magic;
-	}
-
-	bool checkChecksum() const {
-		return magic == Magic && checksum == (blockSize ^ magic);
-	}
-
-	ubyte[] dataSlice() return {
-		return ((cast(ubyte*) &this) + typeof(this).sizeof)[0 .. blockSize];
-	}
-
-	static int opApply(scope int delegate(AllocatedBlock*) dg) {
-		if(nextFree is null)
-			return 0;
-		ubyte* next = &__heap_base;
-		AllocatedBlock* block = cast(AllocatedBlock*) next;
-		while(block.checkChecksum()) {
-			if(auto result = dg(block))
-				return result;
-			next += AllocatedBlock.sizeof;
-			next += block.blockSize;
-			block = cast(AllocatedBlock*) next;
-		}
-
-		return 0;
-	}
-}
-
-static assert(AllocatedBlock.sizeof % 16 == 0);
-
-void free(ubyte* ptr) {
-	auto block = (cast(AllocatedBlock*) ptr) - 1;
-	if(!block.checkChecksum())
-        assert(false, "Could not check block on free");
-
-	block.used = 0;
-	block.flags = 0;
-
-	// last one
-	if(ptr + block.blockSize == nextFree) {
-		nextFree = cast(ubyte*) block;
-		assert(cast(size_t)nextFree % 16 == 0);
-	}
-}
-
-ubyte[] realloc(ubyte* ptr, size_t newSize, string file = __FILE__, size_t line = __LINE__) {
-	if(ptr is null)
-		return malloc(newSize, file, line);
-
-	auto block = (cast(AllocatedBlock*) ptr) - 1;
-	if(!block.checkChecksum())
-		assert(false, "Could not check block while realloc");
-
-	// block.populateChecksum();
-	if(newSize <= block.blockSize) {
-		block.used = newSize;
-		return ptr[0 .. newSize];
-	} else {
-		// FIXME: see if we can extend teh block into following free space before resorting to malloc
-
-		if(ptr + block.blockSize == nextFree) {
-			while(growMemoryIfNeeded(newSize)) {}
-
-			block.blockSize = newSize + newSize % 16;
-			block.used = newSize;
-			block.populateChecksum();
-			nextFree = ptr + block.blockSize;
-			assert(cast(size_t)nextFree % 16 == 0);
-			return ptr[0 .. newSize];
-		}
-
-		auto newThing = malloc(newSize);
-		newThing[0 .. block.used] = ptr[0 .. block.used];
-
-		if(block.flags & AllocatedBlock.Flags.unique) {
-			// if we do malloc, this means we are allowed to free the existing block
-			free(ptr);
-		}
-
-		assert(cast(size_t) newThing.ptr % 16 == 0);
-
-		return newThing;
-	}
-}
-
-/**
-*  If the ptr isn't owned by the runtime, it will completely malloc the data (instead of realloc)
-*   and copy its old content.
-*/
-ubyte[] realloc(ubyte[] ptr, size_t newSize, string file = __FILE__, size_t line = __LINE__)
-{
-    if(ptr is null)
-        return malloc(newSize, file, line);
-    auto block = (cast(AllocatedBlock*) ptr) - 1;
-	if(!block.checkChecksum())
-    {
-        auto ret = malloc(newSize, file, line);
-        ret[0..ptr.length] = ptr[]; //Don't clear ptr memory as it can't be clear.
-        return ret;
-    }
-    else return realloc(ptr.ptr, newSize, file, line);
-
-}
-
-private bool growMemoryIfNeeded(size_t sz) {
-	if(cast(size_t) nextFree + AllocatedBlock.sizeof + sz >= memorySize * 64*1024) {
-		if(llvm_wasm_memory_grow(0, 4) == size_t.max)
-			assert(0); // out of memory
-
-		memorySize = llvm_wasm_memory_size(0);
-
-		return true;
-	}
-
-	return false;
-}
-
-ubyte[] malloc(size_t sz, string file = __FILE__, size_t line = __LINE__) {
-	// lol bumping that pointer
-	if(nextFree is null) {
-		nextFree = &__heap_base; // seems to be 75312
-		assert(cast(size_t)nextFree % 16 == 0);
-		memorySize = llvm_wasm_memory_size(0);
-	}
-
-	while(growMemoryIfNeeded(sz)) {}
-
-	auto base = cast(AllocatedBlock*) nextFree;
-
-	auto blockSize = sz;
-	if(auto val = blockSize % 16)
-	blockSize += 16 - val; // does NOT include this metadata section!
-
-	// debug list allocations
-	//import std.stdio; writeln(file, ":", line, " / ", sz, " +", blockSize);
-
-	base.blockSize = blockSize;
-	base.flags = AllocatedBlock.Flags.inUse;
-	// these are just to make it more reliable to detect this header by backtracking through the pointer from a random array.
-	// otherwise it'd prolly follow the linked list from the beginning every time or make a free list or something. idk tbh.
-	base.magic = AllocatedBlock.Magic;
-	base.populateChecksum();
-
-	base.used = sz;
-
-	// debug
-	base.file = file;
-	base.line = line;
-
-	nextFree += AllocatedBlock.sizeof;
-
-	auto ret = nextFree;
-
-	nextFree += blockSize;
-
-	//writeln(cast(size_t) nextFree);
-	//import std.stdio; writeln(cast(size_t) ret, " of ", sz, " rounded to ", blockSize);
-	//writeln(file, ":", line);
-	assert(cast(size_t) ret % 8 == 0);
-
-	return ret[0 .. sz];
-}
-
-
-ubyte[] calloc(size_t count, size_t size, string file = __FILE__, size_t line = __LINE__) 
-{
-	auto ret = malloc(count*size,file,line);
-	ret[0..$] = 0;
-	return ret;
-}
-
-void reserve(T)(ref T[] arr, size_t length) {
-	arr = (cast(T*) (malloc(length * T.sizeof).ptr))[0 .. 0];
-}
-
-// debug
-export extern(C) void printBlockDebugInfo(void* ptr) {
-	if(ptr is null) {
-		foreach(block; AllocatedBlock) {
-			printBlockDebugInfo(block);
-		}
-		return;
-	}
-
-	// otherwise assume it is a pointer returned from malloc
-
-	auto block = (cast(AllocatedBlock*) ptr) - 1;
-	if(ptr is null)
-		block = cast(AllocatedBlock*) &__heap_base;
-
-	printBlockDebugInfo(block);
-}
-
-// debug
-void printBlockDebugInfo(AllocatedBlock* block) {
-	import std.stdio;
-	writeln(block.blockSize, " ", block.flags, " ", block.checkChecksum() ? "OK" : "X", " ");
-	if(block.checkChecksum())
-		writeln(cast(size_t)((cast(ubyte*) (block + 2)) + block.blockSize), " ", block.file, " : ", block.line);
-}
-
-export extern(C) ubyte* bridge_malloc(size_t sz) {
-	return malloc(sz).ptr;
-}
 
 // then the entry point just for convenience so main works.
 extern(C) int _Dmain(string[] args);
@@ -275,6 +25,12 @@ export extern(C) void _start() { _Dmain(null); }
 extern(C) bool _xopEquals(in void*, in void*) { return false; } // assert(0);
 
 // basic array support {
+
+template _arrayOp(Args...)
+{
+    import core.internal.array.operations;
+    alias _arrayOp = arrayOp!Args;
+}
 
 extern(C) void _d_array_slice_copy(void* dst, size_t dstlen, void* src, size_t srclen, size_t elemsz) {
 	auto d = cast(ubyte*) dst;
@@ -290,28 +46,40 @@ extern(C) void _d_array_slice_copy(void* dst, size_t dstlen, void* src, size_t s
 
 }
 
-extern(C) void _d_arraybounds(string file, size_t line) { //, size_t lwr, size_t upr, size_t length) {
-	arsd.webassembly.eval(q{ console.error("Range error: " + $0 + ":" + $1); /*, "[" + $2 + ".." + $3 + "] <> " + $4);*/ }, file, line);//, lwr, upr, length);
+void reserve(T)(ref T[] arr, size_t length) @trusted {
+	arr = (cast(T*) (malloc(length * T.sizeof).ptr))[0 .. 0];
+}
+
+
+extern(C) void _d_arraybounds(string file, size_t line) {
+	arsd.webassembly.eval(
+        q{ console.error("Range error: " + $0 + ":" + $1 )}, 
+        file, line);
 	arsd.webassembly.abort();
 }
 
 
 /// Called when an out of range slice of an array is created
-extern(C) void _d_arraybounds_slice(string file, uint line, size_t, size_t, size_t)
+extern(C) void _d_arraybounds_slice(string file, uint line, size_t lwr, size_t upr, size_t length)
 {
-    // Ignore additional information for now
-    _d_arraybounds(file, line);
+    arsd.webassembly.eval(
+        q{ console.error("Range error: " + $0 + ":" + $1 + " [" + $2 + ".." + $3 + "] <> " + $4)}, 
+        file, line, lwr, upr, length);
+	arsd.webassembly.abort();
 }
 
 /// Called when an out of range array index is accessed
-extern(C) void _d_arraybounds_index(string file, uint line, size_t, size_t)
+extern(C) void _d_arraybounds_index(string file, uint line, size_t index, size_t length)
 {
-    // Ignore additional information for now
-    _d_arraybounds(file, line);
+    arsd.webassembly.eval(
+        q{ console.error("Array index " + $0  + " out of bounds '[0.."+$1+"]' " + $2 + ":" + $3)},
+        index, length, file, line);
+	arsd.webassembly.abort();
 }
 
 
-extern(C) void* memset(void* s, int c, size_t n) {
+extern(C) void* memset(void* s, int c, size_t n)  @nogc nothrow pure
+{
 	auto d = cast(ubyte*) s;
 	while(n) {
 		*d = cast(ubyte) c;
@@ -324,7 +92,7 @@ extern(C) void* memset(void* s, int c, size_t n) {
 pragma(LDC_intrinsic, "llvm.memcpy.p0i8.p0i8.i#")
     void llvm_memcpy(T)(void* dst, const(void)* src, T len, bool volatile_ = false);
 
-extern(C) void *memcpy(void* dest, const(void)* src, size_t n)
+extern(C) void *memcpy(void* dest, const(void)* src, size_t n) pure @nogc nothrow
 {
 	ubyte *d = cast(ubyte*) dest;
 	const (ubyte) *s = cast(const(ubyte)*)src;
@@ -332,10 +100,10 @@ extern(C) void *memcpy(void* dest, const(void)* src, size_t n)
 	return dest;
 }
 
-extern(C) int memcmp(const(void)* s1, const(void*) s2, size_t n) pure @nogc nothrow @trusted {
+extern(C) int memcmp(const(void)* s1, const(void*) s2, size_t n) pure @nogc nothrow @trusted
+{
 	auto b = cast(ubyte*) s1;
 	auto b2 = cast(ubyte*) s2;
-
 	foreach(i; 0 .. n) {
 		if(auto diff = *b -  *b2)
 			return diff;
@@ -349,18 +117,28 @@ public import core.arsd.utf_decoding;
 
 // }
 
-extern(C) void _d_assert(string file, uint line) {
+extern(C) void _d_assert(string file, uint line)  @trusted @nogc pure
+{
 	arsd.webassembly.eval(q{ console.error("Assert failure: " + $0 + ":" + $1); /*, "[" + $2 + ".." + $3 + "] <> " + $4);*/ }, file, line);//, lwr, upr, length);
 	arsd.webassembly.abort();
 }
+void _d_assertp(immutable(char)* file, uint line)
+{
+    // import core.stdc.string : strlen;
+    size_t sz = 0;
+    while(file[sz] != '\0') sz++;
+    arsd.webassembly.eval(q{ console.error("Assert failure: " + $0 + ":" + $1 + "(" + $2 + ")"); /*, "[" + $2 + ".." + $3 + "] <> " + $4);*/ }, file[0 .. sz], line);//, lwr, upr, length);
+	arsd.webassembly.abort();
+}
 
-extern(C) void _d_assert_msg(string msg, string file, uint line)
+
+extern(C) void _d_assert_msg(string msg, string file, uint line) @trusted @nogc pure
 {
 	arsd.webassembly.eval(q{ console.error("Assert failure: " + $0 + ":" + $1 + "(" + $2 + ")"); /*, "[" + $2 + ".." + $3 + "] <> " + $4);*/ }, file, line, msg);//, lwr, upr, length);
 	arsd.webassembly.abort();
 }
 
-void __switch_error(string file, size_t line)
+void __switch_error(string file, size_t line) @trusted @nogc pure
 {
 	_d_assert_msg("final switch error",file, line);
 }
@@ -378,6 +156,7 @@ bool __equals(T1, T2)(scope const T1[] lhs, scope const T2[] rhs) {
 }
 
 // bare basics class support {
+
 
 extern(C) Object _d_allocclass(TypeInfo_Class ti) {
 	auto ptr = malloc(ti.m_init.length);
@@ -674,17 +453,24 @@ private int __switchSearch(T)(/*in*/ const scope T[][] cases, /*in*/ const scope
     return -1;
 }
 
+//TODO: Support someday?
+    extern(C) void _d_throw_exception(Throwable o)
+    {
+        assert(false, "Exception throw");
+    }
 
-// for floats
-extern(C) double fmod(double f, double w) {
-	auto i = cast(int) f;
-	return i % cast(int) w;
-}
 
 // for closures
 extern(C) void* _d_allocmemory(size_t sz) {
 	return malloc(sz).ptr;
 }
+
+///For POD structures
+extern (C) void* _d_allocmemoryT(TypeInfo ti)
+{
+    return malloc(ti.size).ptr;
+}
+
 
 class Object
 {
@@ -797,6 +583,12 @@ class TypeInfo_Class : TypeInfo
 	override @property size_t size() nothrow pure const
     { return Object.sizeof; }
 
+    override size_t getHash(scope const void* p) @trusted const
+    {
+        auto o = *cast(Object*)p;
+        return o ? o.toHash() : 0;
+    }
+
 	override bool equals(in void* p1, in void* p2) const
     {
         Object o1 = *cast(Object*)p1;
@@ -824,12 +616,81 @@ void destroy(bool initialize = true, T)(ref T obj) if (is(T == struct))
     }
 }
 
+private extern (D) nothrow alias void function (Object) fp_t;
+private extern (C) void rt_finalize2(void* p, bool det = true, bool resetMemory = true) nothrow
+{
+    auto ppv = cast(void**) p;
+    if (!p || !*ppv)
+        return;
+
+    auto pc = cast(TypeInfo_Class*) *ppv;
+    if (det)
+    {
+        auto c = *pc;
+        do
+        {
+            if (c.destructor)
+                (cast(fp_t) c.destructor)(cast(Object) p); // call destructor
+        }
+        while ((c = c.base) !is null);
+    }
+
+    if (resetMemory)
+    {
+        auto w = (*pc).initializer;
+        p[0 .. w.length] = w[];
+    }
+    *ppv = null; // zero vptr even if `resetMemory` is false
+}
+extern(C) void _d_callfinalizer(void* p)
+{
+    rt_finalize2(p);
+}
+
+void destroy(bool initialize = true, T)(T obj) if (is(T == class))
+{
+    static if (__traits(getLinkage, T) == "C++")
+    {
+        static if (__traits(hasMember, T, "__xdtor"))
+            obj.__xdtor();
+
+        static if (initialize)
+        {
+            const initializer = __traits(initSymbol, T);
+            (cast(void*)obj)[0 .. initializer.length] = initializer[];
+        }
+    }
+    else
+    {
+        // Bypass overloaded opCast
+        auto ptr = (() @trusted => *cast(void**) &obj)();
+        rt_finalize2(ptr, true, initialize);
+    }
+}
+void destroy(bool initialize = true, T)(T obj) if (is(T == interface))
+{
+    static assert(__traits(getLinkage, T) == "D", "Invalid call to destroy() on extern(" ~ __traits(getLinkage, T) ~ ") interface");
+
+    destroy!initialize(cast(Object)obj);
+}
+void destroy(bool initialize = true, T)(ref T obj)
+    if (!is(T == struct) && !is(T == interface) && !is(T == class) && !__traits(isStaticArray, T))
+{
+    static if (initialize)
+        obj = T.init;
+}
+
 
 class TypeInfo_Pointer : TypeInfo
 {
     TypeInfo m_next;
 
     override bool equals(in void* p1, in void* p2) const { return *cast(void**)p1 == *cast(void**)p2; }
+    override size_t getHash(scope const void* p) @trusted const
+    {
+        size_t addr = cast(size_t) *cast(const void**)p;
+        return addr ^ (addr >> 4);
+    }
     override @property size_t size() nothrow pure const { return (void*).sizeof; }
 
 	override const(void)[] initializer() const @trusted { return (cast(void *)null)[0 .. (void*).sizeof]; }
@@ -899,7 +760,7 @@ extern (C)
 	private alias AA = void*;
 
     // size_t _aaLen(in AA aa) pure nothrow @nogc;
-    private void* _aaGetY(scope AA* paa, const TypeInfo_AssociativeArray ti, const size_t valsz, const scope void* pkey);
+    private void* _aaGetY(scope AA* paa, const TypeInfo_AssociativeArray ti, const size_t valsz, const scope void* pkey) pure nothrow;
     private void* _aaGetX(scope AA* paa, const TypeInfo_AssociativeArray ti, const size_t valsz, const scope void* pkey, out bool found) ;
     // inout(void)* _aaGetRvalueX(inout AA aa, in TypeInfo keyti, in size_t valsz, in void* pkey);
     inout(void[]) _aaValues(inout AA aa, const size_t keysz, const size_t valsz, const TypeInfo tiValueArray) ;
@@ -913,11 +774,11 @@ extern (C)
     // alias _dg2_t = extern(D) int delegate(void*, void*);
     // int _aaApply2(AA aa, size_t keysize, _dg2_t dg);
 
-    AARange _aaRange(AA aa);
-    bool _aaRangeEmpty(AARange r);
+    AARange _aaRange(AA aa) pure nothrow @nogc @safe;
+    bool _aaRangeEmpty(AARange r) pure @safe @nogc nothrow;
     void* _aaRangeFrontKey(AARange r);
-    void* _aaRangeFrontValue(AARange r);
-    void _aaRangePopFront(ref AARange r);
+    void* _aaRangeFrontValue(AARange r) pure @nogc nothrow;
+    void _aaRangePopFront(ref AARange r) pure @nogc nothrow @safe;
 
     int _aaEqual(scope const TypeInfo tiRaw, scope const AA aa1, scope const AA aa2);
     size_t _aaGetHash(scope const AA* aa, scope const TypeInfo tiRaw) nothrow;
@@ -929,6 +790,72 @@ extern (C)
         copiler allowed to create AA literal with keys, which have impure unsafe toHash methods.
     */
     void* _d_assocarrayliteralTX(const TypeInfo_AssociativeArray ti, void[] keys, void[] values);
+}
+
+private AARange _aaToRange(T: V[K], K, V)(ref T aa) pure nothrow @nogc @safe
+{
+    // ensure we are dealing with a genuine AA.
+    static if (is(const(V[K]) == const(T)))
+        alias realAA = aa;
+    else
+        const(V[K]) realAA = aa;
+    return _aaRange(() @trusted { return *cast(AA*)&realAA; } ());
+}
+
+auto byKey(T : V[K], K, V)(T aa) pure nothrow @nogc @safe
+{
+    import core.internal.traits : substInout;
+
+    static struct Result
+    {
+        AARange r;
+
+    pure nothrow @nogc:
+        @property bool empty()  @safe { return _aaRangeEmpty(r); }
+        @property ref front() @trusted
+        {
+            return *cast(substInout!K*) _aaRangeFrontKey(r);
+        }
+        void popFront() @safe { _aaRangePopFront(r); }
+        @property Result save() { return this; }
+    }
+
+    return Result(_aaToRange(aa));
+}
+
+/** ditto */
+auto byKey(T : V[K], K, V)(T* aa) pure nothrow @nogc
+{
+    return (*aa).byKey();
+}
+
+
+
+auto byValue(T : V[K], K, V)(T aa) pure nothrow @nogc @safe
+{
+    import core.internal.traits : substInout;
+
+    static struct Result
+    {
+        AARange r;
+
+    pure nothrow @nogc:
+        @property bool empty() @safe { return _aaRangeEmpty(r); }
+        @property ref front() @trusted
+        {
+            return *cast(substInout!V*) _aaRangeFrontValue(r);
+        }
+        void popFront() @safe { _aaRangePopFront(r); }
+        @property Result save() { return this; }
+    }
+
+    return Result(_aaToRange(aa));
+}
+
+/** ditto */
+auto byValue(T : V[K], K, V)(T* aa) pure nothrow @nogc
+{
+    return (*aa).byValue();
 }
 
 Key[] keys(T : Value[Key], Value, Key)(T aa) @property
@@ -1148,17 +1075,23 @@ class TypeInfo_Enum : TypeInfo {
     override const(TypeInfo) next() const { return base.next; }
     override bool equals(in void* p1, in void* p2) const { return base.equals(p1, p2); }
 	override @property size_t talign() const { return base.talign; }
+    override void destroy(void* p) const { return base.destroy(p); }
+    override void postblit(void* p) const { return base.postblit(p); }
+
+    override const(void)[] initializer() const
+    {
+        return m_init.length ? m_init : base.initializer();
+    }
 }
 
 extern (C) void[] _d_newarrayU(const scope TypeInfo ti, size_t length)
 {
-	return malloc(length * ti.size); // FIXME size actually depends on ti
+	return malloc(length * ti.next.size);
 }
 
 extern(C) void[] _d_newarrayT(const TypeInfo ti, size_t length)
 {
 	auto arr = _d_newarrayU(ti, length);
-	
 	(cast(byte[])arr)[] = 0;
 	return arr;
 }
@@ -1223,6 +1156,53 @@ extern (C) void* _d_newitemiT(in TypeInfo _ti)
     memcpy(p, init.ptr, init.length);
     return p;
 }
+
+
+
+private void[] _d_newarrayOpT(alias op)(const TypeInfo ti, size_t[] dimensions)
+{
+    if (dimensions.length == 0)
+        return null;
+
+    void[] foo(const TypeInfo ti, size_t[] dimensions)
+    {
+        size_t count = dimensions[0];
+
+        if (dimensions.length == 1)
+        {
+            auto r = op(ti, count);
+            return (*cast(void[]*)(&r))[0..count];
+        }
+        void[] p = malloc((void[]).sizeof * count);
+
+        foreach (i; 0..count)
+        {
+            (cast(void[]*)p.ptr)[i] = foo(ti.next, dimensions[1..$]);
+        }
+        return p[0..count];
+    }
+
+    return foo(ti, dimensions);
+}
+
+
+extern (C) void[] _d_newarraymTX(const TypeInfo ti, size_t[] dims)
+{
+    if (dims.length == 0)
+        return null;
+    else
+        return _d_newarrayOpT!(_d_newarrayT)(ti, dims);
+}
+
+/// ditto
+extern (C) void[] _d_newarraymiTX(const TypeInfo ti, size_t[] dims)
+{
+    if (dims.length == 0)
+        return null;
+    else
+        return _d_newarrayOpT!(_d_newarrayiT)(ti, dims);
+}
+
 
 
 
@@ -1425,7 +1405,7 @@ static foreach(type; AliasSeq!(byte, char, dchar, double, float, int, long, shor
 		}
 		class TypeInfo_A}~type.mangleof~q{ : TypeInfo_Array {
             override string toString() const { return (type[]).stringof; }
-			override const(TypeInfo) next() const { return typeid(type); }
+			override const(TypeInfo) next() const { return cast(inout)typeid(type); }
             override size_t getHash(scope const void* p) @trusted const nothrow
             {
                 return hashOf(*cast(const type[]*) p);
@@ -1447,6 +1427,16 @@ static foreach(type; AliasSeq!(byte, char, dchar, double, float, int, long, shor
 		}
 	});
 }
+// typeof(null)
+class TypeInfo_n : TypeInfo
+{
+    const: pure: @nogc: nothrow: @safe:
+    override string toString() { return "typeof(null)"; }
+    override size_t getHash(scope const void*) { return 0; }
+    override bool equals(in void*, in void*) { return true; }
+    override @property size_t size() { return typeof(null).sizeof; }
+    override const(void)[] initializer() @trusted { return (cast(void *)null)[0 .. size_t.sizeof]; }
+}
 
 struct Interface {
 	TypeInfo_Class classinfo;
@@ -1464,14 +1454,49 @@ struct OffsetTypeInfo
     TypeInfo ti;        /// TypeInfo for this member
 }
 
+class TypeInfo_Axa : TypeInfo_Aa {
+    
+}
 class TypeInfo_Aya : TypeInfo_Aa {
 
 }
 
+class TypeInfo_Function : TypeInfo
+{
+    override string toString() const pure @trusted{return deco;}
+    override bool opEquals(Object o)
+    {
+        if (this is o)
+            return true;
+        auto c = cast(const TypeInfo_Function)o;
+        return c && this.deco == c.deco;
+    }
+
+    // BUG: need to add the rest of the functions
+
+    override @property size_t size() nothrow pure const
+    {
+        return 0;       // no size for functions
+    }
+    override const(void)[] initializer() const @safe{return null;}
+    TypeInfo _next;
+    override const(TypeInfo) next()nothrow pure inout @nogc  { return _next; }
+
+    /**
+    * Mangled function type string
+    */
+    string deco;
+}
+
+
 class TypeInfo_Delegate : TypeInfo {
 	TypeInfo next;
 	string deco;
-	override size_t size() const { return size_t.sizeof * 2; }
+	override @property size_t size() nothrow pure const
+    {
+        alias dg = int delegate();
+        return dg.sizeof;
+    }
 	override bool equals(in void* p1, in void* p2) const
     {
         auto dg1 = *cast(void delegate()*)p1;
@@ -1482,6 +1507,11 @@ class TypeInfo_Delegate : TypeInfo {
     {
         return (cast(void *)null)[0 .. (int delegate()).sizeof];
     }
+    override size_t getHash(scope const void* p) @trusted const
+    {
+        return hashOf(*cast(const void delegate() *)p);
+    }
+
 	override @property size_t talign() nothrow pure const
     {
         alias dg = int delegate();
@@ -1504,6 +1534,17 @@ class TypeInfo_Interface : TypeInfo
 
         return o1 == o2 || (o1 && o1.opCmp(o2) == 0);
     }
+    override size_t getHash(scope const void* p) @trusted const
+    {
+        if (!*cast(void**)p)
+        {
+            return 0;
+        }
+        Interface* pi = **cast(Interface ***)*cast(void**)p;
+        Object o = cast(Object)(*cast(void**)p - pi.offset);
+        assert(o);
+        return o.toHash();
+    }
 
 	override const(void)[] initializer() const @trusted
     {
@@ -1525,6 +1566,30 @@ class TypeInfo_Const : TypeInfo {
     override @property size_t talign() nothrow pure const { return base.talign; }
 	override bool equals(in void* p1, in void* p2) const { return base.equals(p1, p2); 	}
 }
+
+
+///For some reason, getHash for interfaces wanted that
+pragma(mangle, "_D9invariant12_d_invariantFC6ObjectZv")
+extern(D) void _d_invariant(Object o)
+{
+    TypeInfo_Class c;
+
+    //printf("__d_invariant(%p)\n", o);
+
+    // BUG: needs to be filename/line of caller, not library routine
+    assert(o !is null); // just do null check, not invariant check
+
+    c = typeid(o);
+    do
+    {
+        if (c.classInvariant)
+        {
+            (*c.classInvariant)(o);
+        }
+        c = c.base;
+    } while (c);
+}
+
 /+
 class TypeInfo_Immutable : TypeInfo {
 	size_t getHash(in void*) nothrow { return 0; }
@@ -1568,6 +1633,22 @@ class TypeInfo_Struct : TypeInfo {
 	void function(void*) xpostblit;
 	uint align_;
 	immutable(void)* rtinfo;
+    // private struct _memberFunc //? Is it necessary
+    // {
+    //     union
+    //     {
+    //         struct // delegate
+    //         {
+    //             const void* ptr;
+    //             const void* funcptr;
+    //         }
+    //         @safe pure nothrow
+    //         {
+    //             bool delegate(in void*) xopEquals;
+    //             int delegate(in void*) xopCmp;
+    //         }
+    //     }
+    // }
 
 	enum StructFlags : uint
 	{
@@ -1649,7 +1730,7 @@ void __ArrayDtor(T)(scope T[] a)
         e.__xdtor();
 }
 
-TTo[] __ArrayCast(TFrom, TTo)(return scope TFrom[] from)
+TTo[] __ArrayCast(TFrom, TTo)(return scope TFrom[] from) nothrow
 {
     const fromSize = from.length * TFrom.sizeof;
     const toLength = fromSize / TTo.sizeof;
@@ -1694,6 +1775,58 @@ extern (C) int _adEq2(void[] a1, void[] a2, TypeInfo ti)
     return 1;
 }
 
+V[K] dup(T : V[K], K, V)(T aa)
+{
+    //pragma(msg, "K = ", K, ", V = ", V);
+
+    // Bug10720 - check whether V is copyable
+    static assert(is(typeof({ V v = aa[K.init]; })),
+        "cannot call " ~ T.stringof ~ ".dup because " ~ V.stringof ~ " is not copyable");
+
+    V[K] result;
+
+    //foreach (k, ref v; aa)
+    //    result[k] = v;  // Bug13701 - won't work if V is not mutable
+
+    ref V duplicateElem(ref K k, ref const V v) @trusted pure nothrow
+    {
+        void* pv = _aaGetY(cast(AA*)&result, typeid(V[K]), V.sizeof, &k);
+        memcpy(pv, &v, V.sizeof);
+        return *cast(V*)pv;
+    }
+
+    foreach (k, ref v; aa)
+    {
+        static if (!__traits(hasPostblit, V))
+            duplicateElem(k, v);
+        else static if (__traits(isStaticArray, V))
+            _doPostblit(duplicateElem(k, v)[]);
+        else static if (!is(typeof(v.__xpostblit())) && is(immutable V == immutable UV, UV))
+            (() @trusted => *cast(UV*) &duplicateElem(k, v))().__xpostblit();
+        else
+            duplicateElem(k, v).__xpostblit();
+    }
+
+    return result;
+}
+
+/** ditto */
+V[K] dup(T : V[K], K, V)(T* aa)
+{
+    return (*aa).dup;
+}
+
+T[] dup(T)(scope T[] array) pure nothrow @trusted if (__traits(isPOD, T) && !is(const(T) : T))
+{
+	T[] result;
+	foreach(ref e; array) {
+		result ~= e;
+	}
+	return result;
+}
+
+
+
 T[] dup(T)(scope const(T)[] array) pure nothrow @trusted if (__traits(isPOD, T))
 {
 	T[] result;
@@ -1711,5 +1844,188 @@ immutable(T)[] idup(T)(scope const(T)[] array) pure nothrow @trusted
 	}
 	return result;
 }
+
+class Error { this(string msg) {} }
+class Throwable : Object
+{
+    interface TraceInfo
+    {
+        int opApply(scope int delegate(ref const(char[]))) const;
+        int opApply(scope int delegate(ref size_t, ref const(char[]))) const;
+        string toString() const;
+    }
+
+    string      msg;    /// A message describing the error.
+
+    /**
+     * The _file name of the D source code corresponding with
+     * where the error was thrown from.
+     */
+    string      file;
+    /**
+     * The _line number of the D source code corresponding with
+     * where the error was thrown from.
+     */
+    size_t      line;
+
+    /**
+     * The stack trace of where the error happened. This is an opaque object
+     * that can either be converted to $(D string), or iterated over with $(D
+     * foreach) to extract the items in the stack trace (as strings).
+     */
+    TraceInfo   info;
+
+    /**
+     * A reference to the _next error in the list. This is used when a new
+     * $(D Throwable) is thrown from inside a $(D catch) block. The originally
+     * caught $(D Exception) will be chained to the new $(D Throwable) via this
+     * field.
+     */
+    private Throwable   nextInChain;
+
+    private uint _refcount;     // 0 : allocated by GC
+                                // 1 : allocated by _d_newThrowable()
+                                // 2.. : reference count + 1
+
+    /**
+     * Returns:
+     * A reference to the _next error in the list. This is used when a new
+     * $(D Throwable) is thrown from inside a $(D catch) block. The originally
+     * caught $(D Exception) will be chained to the new $(D Throwable) via this
+     * field.
+     */
+    @property inout(Throwable) next() @safe inout return scope pure nothrow @nogc { return nextInChain; }
+
+    /**
+     * Replace next in chain with `tail`.
+     * Use `chainTogether` instead if at all possible.
+     */
+    @property void next(Throwable tail) @safe scope pure nothrow @nogc{}
+
+    /**
+     * Returns:
+     *  mutable reference to the reference count, which is
+     *  0 - allocated by the GC, 1 - allocated by _d_newThrowable(),
+     *  and >=2 which is the reference count + 1
+     * Note:
+     *  Marked as `@system` to discourage casual use of it.
+     */
+    @system @nogc final pure nothrow ref uint refcount() return { return _refcount; }
+
+    /**
+     * Loop over the chain of Throwables.
+     */
+    int opApply(scope int delegate(Throwable) dg)
+    {
+        int result = 0;
+        for (Throwable t = this; t; t = t.nextInChain)
+        {
+            result = dg(t);
+            if (result)
+                break;
+        }
+        return result;
+    }
+
+    /**
+     * Append `e2` to chain of exceptions that starts with `e1`.
+     * Params:
+     *  e1 = start of chain (can be null)
+     *  e2 = second part of chain (can be null)
+     * Returns:
+     *  Throwable that is at the start of the chain; null if both `e1` and `e2` are null
+     */
+    static @system @nogc pure nothrow Throwable chainTogether(return scope Throwable e1, return scope Throwable e2)
+    {
+        if (!e1)
+            return e2;
+        if (!e2)
+            return e1;
+        if (e2.refcount())
+            ++e2.refcount();
+
+        for (auto e = e1; 1; e = e.nextInChain)
+        {
+            if (!e.nextInChain)
+            {
+                e.nextInChain = e2;
+                break;
+            }
+        }
+        return e1;
+    }
+
+    @nogc @safe pure nothrow this(string msg, Throwable nextInChain = null)
+    {
+        this.msg = msg;
+        this.nextInChain = nextInChain;
+        if (nextInChain && nextInChain._refcount)
+            ++nextInChain._refcount;
+        //this.info = _d_traceContext();
+    }
+
+    @nogc @safe pure nothrow this(string msg, string file, size_t line, Throwable nextInChain = null)
+    {
+        this(msg, nextInChain);
+        this.file = file;
+        this.line = line;
+        //this.info = _d_traceContext();
+    }
+
+    @trusted nothrow ~this(){}
+
+    /**
+     * Overrides $(D Object.toString) and returns the error message.
+     * Internally this forwards to the $(D toString) overload that
+     * takes a $(D_PARAM sink) delegate.
+     */
+    override string toString()
+    {
+        string s;
+        toString((in buf) { s ~= buf; });
+        return s;
+    }
+
+    /**
+     * The Throwable hierarchy uses a toString overload that takes a
+     * $(D_PARAM _sink) delegate to avoid GC allocations, which cannot be
+     * performed in certain error situations.  Override this $(D
+     * toString) method to customize the error message.
+     */
+    void toString(scope void delegate(in char[]) sink) const{}
+
+    /**
+     * Get the message describing the error.
+     * Base behavior is to return the `Throwable.msg` field.
+     * Override to return some other error message.
+     *
+     * Returns:
+     *  Error message
+     */
+    const(char)[] message() const
+    {
+        return this.msg;
+    }
+}
+class Exception : Throwable
+{
+
+    /**
+     * Creates a new instance of Exception. The nextInChain parameter is used
+     * internally and should always be $(D null) when passed by user code.
+     * This constructor does not automatically throw the newly-created
+     * Exception; the $(D throw) statement should be used for that purpose.
+     */
+    @nogc @safe pure nothrow this(string msg, string file = __FILE__, size_t line = __LINE__, Throwable nextInChain = null)
+    {
+        super(msg, file, line, nextInChain);
+    }
+
+    @nogc @safe pure nothrow this(string msg, Throwable nextInChain, string file = __FILE__, size_t line = __LINE__)
+    {
+        super(msg, file, line, nextInChain);
+    }
+}
+
 
 import core.internal.hash;

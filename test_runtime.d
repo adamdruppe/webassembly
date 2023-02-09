@@ -3,6 +3,8 @@
 import arsd.webassembly;
 import std.stdio;
 
+alias thisModule = __traits(parent, {});
+
 class A {
 	int _b = 200;
 	int a() { return 123; }
@@ -114,4 +116,54 @@ void main()
 	foreach(v; cast(ubyte[])arrCastTest)
 		writeln(v);
 
+
+
+	enum Type
+	{
+		int_,
+		string_,
+	}
+	struct TestWithPtr
+	{
+		int* a;
+		Type t = Type.string_;
+	}
+
+	TestWithPtr[] _;
+	_~= TestWithPtr(new int(50), Type.int_);
+	_ = _[0..$-1];
+	_~= TestWithPtr(new int(100), Type.string_);
+	_~= TestWithPtr(new int(150), Type.string_);
+	_~= TestWithPtr(new int(200), Type.int_);
+
+	foreach(v; _)
+		writeln(*v.a);
+
+
+	char[] sup;
+	string rev;
+
+	// string test = null;
+	for(int i = 'a'; i <= 'z'; i++)
+	{
+		sup~= cast(char)i;
+		rev~= ('z' - cast(char)i) + 'a';
+	}
+	writeln((typeid(sup)).toString);
+
+	static foreach(mem; __traits(allMembers, std.stdio))
+		writeln(mem);
+
+	float[][] matrixTest = new float[][](8, 8);
+
+	foreach(array; matrixTest)
+		foreach(value; array)
+			writeln(value);
+
+	// foreach(array; matrixTest)
+	// 	foreach(value; array)
+	// 		writeln(value);
+
+
+	assert(false, sup~sup~sup);
 }
